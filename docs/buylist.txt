@@ -1,5 +1,5 @@
 HARDWARE:
-Raspberry pi 5 4GB - 110$ - https://www.canakit.com/raspberry-pi-5-4gb.html
+Raspberry pi 4, 4GB or more
 Power supply for pi
 microSD 32GB
 Prob a cooling system for the pi
