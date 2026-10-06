@@ -1,68 +1,111 @@
-# This file defines the three vocabularies of the whole kiosk system:
-# 1. Events - facts that have already happened, flowing into the machine. "UID was scanned", etc.
-# 2. States - the finite set of states that the kiosk can be in. IDLE, CHECKING_TRAINING, etc.
-# 3. Effects - instructions the machine hands back for the controller to execute.
-# "Open the iris door", "Call create_link with this UID", etc.
+"""Internal kiosk vocabulary, not an agreed backend/network schema.
+
+The controller executes effects and supplies facts. It owns reader validation,
+same-card assurance, readiness checks, and timer durations; handle() performs no I/O.
+"""
 
 from dataclasses import dataclass
 from enum import StrEnum
 
-# EVENTS
+
+class KioskState(StrEnum):
+    IDLE = "idle"
+    ACTIVATING = "activating"
+    AWAITING_IDENTITY = "awaiting_identity"
+    REGISTERING = "registering"
+    RESULT = "result"
+    OFFLINE = "offline"
+    READER_ERROR = "reader_error"
+    OUTCOME_UNKNOWN = "outcome_unknown"
 
 
-@dataclass(frozen=True)
-class StudentScan:
-    student_number: str
+class BackendOp(StrEnum):
+    ACTIVATE_UID = "activate_uid"
+    REGISTER_AND_ACTIVATE = "register_and_activate"
+
+
+class Outcome(StrEnum):
+    ACTIVATED = "activated"
+    ALREADY_ACTIVE = "already_active"
+    UNREGISTERED = "unregistered"  # Routing only; this is not an unknown student.
+    REGISTERED_AND_ACTIVE = "registered_and_active"
+    REPLACED_AND_ACTIVE = "replaced_and_active"
+    UNKNOWN_STUDENT = "unknown_student"  # Display 1: account-signup QR.
+    MISSING_INDUCTION = "missing_induction"  # Display 1: training-signup QR.
+    DENIED = "denied"
+    UID_CONFLICT = "uid_conflict"
+    READ_AGAIN = "read_again"  # Local feedback, never a backend response.
+    SESSION_EXPIRED = "session_expired"  # Local feedback, never a backend response.
+
+
+class FailureKind(StrEnum):
+    NOT_SENT = "not_sent"  # Only when the controller knows no request was sent.
+    UNKNOWN = "unknown"  # Includes lost responses and possible partial writes.
+
+
+class TimeoutName(StrEnum):
+    SESSION = "session"
+    RESULT = "result"
 
 
 @dataclass(frozen=True)
 class UidScan:
+    """A fresh presentation after the required RF commands were acknowledged.
+
+    Allocate increasing session IDs only when IDLE and ready; never reuse an ID.
+    Further reads from that presentation retain its ID, including conflicting reads.
+    """
+
+    session_id: int
     uid: str
 
 
-# Every BadScan event lands in the same ERROR_TRANSIENT state,
-# but the reason is useful for logging and debugging.
+@dataclass(frozen=True)
+class IdentityConfirmed:
+    """The controller has established that BOTH identifiers belong to one card.
+
+    A shared session ID or a short time window is not sufficient evidence. Real
+    hardware must not emit this until the same-card mechanism has been validated.
+    """
+
+    session_id: int
+    uid: str
+    student_number: str
+
+
 @dataclass(frozen=True)
 class BadScan:
+    """The current presentation is ambiguous/corrupt, not merely missing optional input."""
+
+    session_id: int
     reason: str
 
 
-class TrainingStatus(StrEnum):  # TODO: talk with backend team
-    TRAINED = "trained"  # the student is trained, proceed
-    NOT_TRAINED = "not_trained"  # the student is not trained, tell them website to get trained
-    HAS_CARD_OUT = "has_card_out"  # the student alr has a makerspace card out
-    UNKNOWN_STUDENT = (
-        "unknown_student"  # the student is not in the database, show QR code to sign up
-    )
+@dataclass(frozen=True)
+class CancelSession:
+    session_id: int
 
 
 @dataclass(frozen=True)
-class TrainingResult:
-    status: TrainingStatus
+class BackendResult:
+    """An authoritative result for the original (session_id, op) operation.
 
+    Success includes current eligibility and activation. Replacement success also
+    includes invalidation of the old UID. Denials and UNREGISTERED imply no write.
+    reason is a backend reason code; the approved display mapping is still open.
+    """
 
-class LinkStatus(StrEnum):
-    SUCCESS = "success"
-    UID_NOT_IN_DATABASE = "uid_not_in_database"
-    CARD_ALREADY_LINKED = "card_already_linked"
-    STUDENT_ALREADY_HAS_CARD = "student_already_has_card"
-
-
-@dataclass(frozen=True)
-class LinkResult:
-    status: LinkStatus
-
-
-class BackendErrorOp(StrEnum):
-    GET_TRAINING = "get_training"
-    CHECK_CARD = "check_card"
-    CREATE_LINK = "create_link"
-    DELETE_LINK = "delete_link"
+    session_id: int
+    op: BackendOp
+    outcome: Outcome
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
 class BackendError:
-    op: BackendErrorOp
+    session_id: int
+    op: BackendOp
+    kind: FailureKind = FailureKind.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -75,166 +118,85 @@ class BackendOffline:
     pass
 
 
-class MotorDevice(StrEnum):
-    IRIS = "iris"
-    DRAWER = "drawer"
+@dataclass(frozen=True)
+class ReaderReady:
+    """Current reader readiness has been verified, including after any recovery."""
 
-
-class MotorDirection(StrEnum):
-    OPEN = "open"
-    CLOSE = "close"
+    session_id: int
 
 
 @dataclass(frozen=True)
-class MotorDone:
-    device: MotorDevice
-    direction: MotorDirection
-
-
-@dataclass(frozen=True)
-class MotorJam:
-    device: MotorDevice
-    direction: MotorDirection
-
-
-class TimeoutName(StrEnum):
-    DISPENSE_OPEN = "dispense_open"
-    DRAWER_DWELL = "drawer_dwell"
-    TRANSIENT_ERROR = "transient_error"
-    QR_CODE = "qr_code"
+class ReaderFault:
+    session_id: int
+    reason: str
 
 
 @dataclass(frozen=True)
 class Timeout:
+    session_id: int
     name: TimeoutName
 
 
-@dataclass(frozen=True)
-class StockChanged:
-    stock: int
-
-
-class AdminOp(StrEnum):
-    CLEAR_OUT_OF_SERVICE = "clear_out_of_service"
-    CANCEL_SESSION = "cancel_session"
-
-
-@dataclass(frozen=True)
-class AdminCommand:
-    command: AdminOp
-
-
 Event = (
-    StudentScan
-    | UidScan
+    UidScan
+    | IdentityConfirmed
     | BadScan
-    | TrainingResult
-    | LinkResult
+    | CancelSession
+    | BackendResult
     | BackendError
     | BackendOnline
     | BackendOffline
-    | MotorDone
-    | MotorJam
+    | ReaderReady
+    | ReaderFault
     | Timeout
-    | StockChanged
-    | AdminCommand
 )
 
-# STATES
 
-
-class KioskState(StrEnum):
-    BOOTING = "booting"
-    IDLE = "idle"
-    CHECKING_TRAINING = "checking_training"
-    NOT_TRAINED = "not_trained"
-    ALREADY_HAS_CARD = "already_has_card"
-    UNKNOWN_STUDENT = "unknown_student"
-    DISPENSE_OPENING = "dispense_opening"
-    DISPENSE_OPEN = "dispense_open"
-    LINKING = "linking"
-    DISPENSE_CLOSING = "dispense_closing"
-    RETURN_OPENING = "return_opening"
-    RETURN_OPEN = "return_open"
-    RETURN_CLOSING = "return_closing"
-    OUT_OF_STOCK = "out_of_stock"
-    OFFLINE = "offline"  # wifi down or backend unreachable
-    ERROR_TRANSIENT = (
-        "error_transient"  # bad read | unknown UID card | wrong card type | backend error
-    )
-    OUT_OF_SERVICE = "out_of_service"  # iris fail | unrecoverable motor jam
-
-
-# EFFECTS
-# Motor commands
 @dataclass(frozen=True)
-class MoveMotor:
-    device: MotorDevice
-    direction: MotorDirection
+class ActivateUid:
+    session_id: int
+    uid: str
 
 
-# Backend commands
 @dataclass(frozen=True)
-class GetTraining:
+class RegisterAndActivate:
+    """One logical operation; the backend decides new registration versus replacement."""
+
+    session_id: int
+    uid: str
     student_number: str
 
 
 @dataclass(frozen=True)
-class CheckCard:
+class CaptureIdentity:
+    """Schedule optional identity capture concurrently with UID activation, without blocking."""
+
+    session_id: int
     uid: str
 
 
 @dataclass(frozen=True)
-class CreateLink:
-    student_number: str
-    uid: str
+class StopCapture:
+    """Discard this presentation's buffered input and rearm the readers safely.
 
+    Report any failure as ReaderFault. This does not cancel or undo a backend write.
+    """
 
-@dataclass(frozen=True)
-class DeleteLink:
-    uid: str
+    session_id: int
 
 
 @dataclass(frozen=True)
 class StartTimeout:
+    session_id: int
     name: TimeoutName
 
 
 @dataclass(frozen=True)
 class CancelTimeout:
+    session_id: int
     name: TimeoutName
 
 
-@dataclass(frozen=True)
-class EnqueueUnlink:
-    uid: str
-
-
-class AlertSeverity(StrEnum):
-    URGENT = "urgent"
-    ROUTINE = "routine"
-
-
-@dataclass(frozen=True)
-class Alert:
-    severity: AlertSeverity
-    message: str
-
-
-@dataclass(frozen=True)
-class AdjustStock:
-    delta: int
-
-
 Effect = (
-    MoveMotor
-    | GetTraining
-    | CheckCard
-    | CreateLink
-    | DeleteLink
-    | StartTimeout
-    | CancelTimeout
-    | EnqueueUnlink
-    | Alert
-    | AdjustStock
+    ActivateUid | RegisterAndActivate | CaptureIdentity | StopCapture | StartTimeout | CancelTimeout
 )

@@ -1,7 +1,5 @@
 # AGENTS.md
 
-NEVER READ kiosk_test.py
-
 ## Working mode: Shane codes, the agent mentors
 
 Shane writes all implementation code himself. The agent's role is a highly skilled senior developer guiding, mentoring, and teaching:
@@ -12,16 +10,9 @@ Shane writes all implementation code himself. The agent's role is a highly skill
 - Do NOT write feature/implementation code unless Shane explicitly asks for it. Explaining with short illustrative snippets is fine; producing the actual implementation is not.
 - Prefer teaching the underlying principle over just giving the answer.
 
-## Agent skills
+## Explanation write-ups
 
-### Issue tracker
-
-Issues and PRDs are tracked as GitHub issues in `3D-Western/Kiosk` via the `gh` CLI; external PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Canonical triage vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+When Shane explicitly asks for an explanation of work just done, write it up as
+`docs/explanations/YYYY-MM-DD-topic.md` in plain language, glossing any unavoidable jargon in
+brackets. That folder is **gitignored** — local notes, not project docs — so content search
+(ripgrep) will not see it. Read it by path, or list it with a glob.

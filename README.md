@@ -1,70 +1,31 @@
 # Makerspace Access Kiosk
 
-A self-service kiosk that gives access to the 3D-Western makerspace machines and tools. A student scans their campus card and if their training is on file, the kiosk dispenses a reusable RFID **makerspace card** linked to them. Tools in the space unlock only for a card whose owner is trained on that tool. On the way out, the student drops the card back in the kiosk and the link is removed.
+A student-card registration and daily tool-access kiosk for 3D-Western. Students use their existing campus cards instead of borrowing separate RFID cards.
 
-The kiosk owns the card lifecycle — dispense, link, unlink, return — and nothing else. Tool readers and the training database belong to the backend.
+**Status:** the pure Python core and tests now model student-card registration, replacement, and daily activation. The controller, real-reader integration, backend agreement, and displays are still pending; this is a tested starting point, not a working hardware kiosk. Start with [the implemented transitions and next work](docs/plan.md#7-core-migration-implemented-and-next-work), [glossary](CONTEXT.md), and [open questions](TODO.md).
 
-## How it works
+## Intended student flow
 
-**Checkout**
+1. **First registration:** present one student card to two adjacent readers. The PN532 reads the hexadecimal UID and disables its RF field; the OMNIKEY then reads the student number. The backend verifies the account, general induction, and eligibility before registering the association and activating the visit. Reliable same-card assurance remains to be established before production registration.
+2. **Repeat visits:** tap the UID reader once. The backend checks current eligibility and activates access. If already active, the kiosk confirms that status; it does not check the student out.
+3. **Replacement card:** registration replaces the old UID association after verification, invalidates the old card's access, and activates the replacement.
+4. **Daily reset:** activation expires at midnight in America/Toronto. Registration remains, and an eligible student may immediately reactivate. One activation covers all participating tools; each tool still checks its own training requirements.
 
-1. Student scans their campus card at the student-card reader (an OMNIKEY 5427 that types the student number as keyboard input).
-2. The kiosk asks the backend whether that student is trained. Not trained → a QR code to the training signup page. No club account → a QR code to account signup.
-3. If trained, the motorised iris on the dispense box opens. The student takes one card and taps it on the makerspace-card reader, which links the card to them in the backend. The iris closes.
+No account means an account-signup QR and a rescan after signup. Missing induction means a training-signup QR, with no registration or activation. Backend unavailability prevents registration and activation; success requires backend confirmation.
 
-**Return**
+One-presentation registration has been tested on one card. Broader reliability and safe pairing of the two reader outputs remain validation tasks.
 
-A linked makerspace card tapped at the reader — by anyone, at any time — unlinks it and unlocks the return drawer to drop it into. No student-card scan is needed to return a card, so cards can be handed back for someone else (see [ADR-0004](docs/adr/0004-single-shared-makerspace-card-reader.md)).
+## Responsibilities and hardware
 
-**Offline behaviour**
+The kiosk handles student interaction and calls the agreed backend interface. The backend/tool team owns accounts, training, eligibility, persistent associations, visit records, daily expiry, and tool enforcement. Entrance-door control is outside scope.
 
-The kiosk runs on WiFi and treats backend blips as routine. Checkout **fails closed** (no training check, no card), returns **stay open** — the drawer still accepts cards and the unlink is queued in a local outbox, retried until delivered. A nightly backend-side reset unlinks anything that slipped through (see [ADR-0002](docs/adr/0002-offline-failure-policy.md)).
+The current hardware plan retains a Raspberry Pi 4 (4 GB or more), the OMNIKEY 5427, a UID reader, and two output-only displays: display 1 guides the current student's registration or activation; display 2 shows general instructions and system status without student-specific information. See the [buylist](docs/buylist.txt) for planning details. The retained architecture direction is a Python core with a Chromium web UI; it is not all implemented.
 
-## Architecture
-
-One Python asyncio process on a Raspberry Pi 5 owns everything: both card readers (exclusively grabbed as evdev devices so scans can't leak keystrokes anywhere else), the dispense-box iris, the return drawer, and two output-only displays rendered by Chromium in kiosk mode from a locally served web page ([ADR-0003](docs/adr/0003-python-core-web-ui-scan-driven.md)).
-
-The core of the design is a **pure state machine**:
-
-```
-handle(state, context, event) -> (new_state, new_context, [effects])
-```
-
-- **Events** are facts that already happened: a card was scanned, the backend answered, a motor finished or jammed, a timeout fired.
-- **Effects** are instructions handed back for execution: move a motor, call the backend, start a timeout, raise a staff alert.
-- The machine does no I/O and never sees a clock. The controller executes effects and feeds their outcomes back in as new events. Displays are never commanded directly — the controller broadcasts a full state snapshot over a websocket on every transition, and each display renders it.
-
-This makes every flow — including motor jams and offline edge cases — unit-testable with plain function calls, no hardware and no mocks of the machine itself.
-
-```
-kiosk/            # the Python core
-├── events.py     # event, state, and effect vocabularies
-└── machine.py    # pure transition function + session context
-tests/            # pytest suite, one test per transition
-docs/
-├── adr/          # architecture decision records
-└── agents/       # agent workflow docs
-CONTEXT.md        # domain glossary — the project's ubiquitous language
-TODO.md           # open questions awaiting decisions
-```
-
-## Hardware (v1)
-
-| Part | Role |
-|---|---|
-| Raspberry Pi 5 | runs the single Python core + both displays |
-| OMNIKEY 5427 | student-card reader (keyboard wedge, outputs student number) |
-| 13.56 MHz RFID reader | single shared makerspace-card reader for link and return |
-| Iris-diaphragm dispense box | motorised enclosure holding the card pool |
-| Locking return drawer | motorised drawer that collects returned cards |
-| 2 × 15.6" USB-C/HDMI displays | output-only screens (front + return side), no touch |
-
-> [!NOTE]
-> Motor control is an abstract protocol with mock drivers for now — the mechanical design (iris vs. single-vend dispenser) is still being decided, so v1 code runs fully against fakes.
+V1 has no card dispensing, returns, motors, stock tracking, or non-return flags. Founder access is deferred for further requirements gathering. [ADR-0005](docs/adr/0005-student-card-registration-and-daily-activation.md) explains the change; the old [M1 roadmap](docs/m1-roadmap.md) is historical.
 
 ## Development
 
-Requires Python 3.13 (the Pi's version).
+Requires Python 3.13 or later, as declared in `pyproject.toml`.
 
 ```sh
 python -m venv .venv
@@ -73,17 +34,17 @@ pip install -e .
 pip install --group dev
 ```
 
-Quality gates — all three must pass before anything is considered done:
+Checks for implementation work:
 
 ```sh
-ruff format
-ruff check
+ruff format --check kiosk tests
+ruff check kiosk tests
 pyright
-pytest
+pytest tests/test_machine.py tests/test_invariants.py
 ```
 
-The state machine develops test-first: transitions are written as failing tests from the design's transition table, then implemented until green.
+Run checks in the activated virtual environment. If Pyright cannot locate its interpreter, pass `--pythonpath .venv/Scripts/python.exe` on Windows (or `.venv/bin/python` on the Pi).
 
-## Status
+The pure state machine uses `handle(state, context, event)` to return a new state, context, and effects without I/O. A UID starts backend activation; an unregistered UID proceeds to registration only with a controller-confirmed identity pair. Results and timers are scoped to the interaction. Lost write responses hold the machine in `OUTCOME_UNKNOWN`; reconnection alone does not release that hold.
 
-Early development. The event/state/effect vocabularies and the happy checkout path of the state machine are implemented and tested; returns, offline handling, jam escalation, the web UI, the backend client, and Pi provisioning are in progress. The backend REST contract is a proposal pending review with the backend team.
+The tests cover the core's decisions using synthetic events. They do not establish physical same-card assurance, backend persistence, replacement invalidation, midnight expiry, or tool enforcement. The internal event/effect names are provisional and do not specify network endpoints. See [plan section 7](docs/plan.md#7-core-migration-implemented-and-next-work) for controller obligations and integration work. Shane normally writes implementation with mentor support; this core migration was explicitly delegated.

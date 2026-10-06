@@ -1,5 +1,7 @@
 # Single shared makerspace-card reader for both checkout and return
 
+> **Superseded, 2026-09-16:** [ADR-0005](0005-student-card-registration-and-daily-activation.md) replaces link/return intent with persistent student registration and daily activation. A registered UID no longer means return or unlink. The original reasoning and references to old TODO items below are historical.
+
 One 13.56 MHz makerspace-card reader serves both checkout (link) and return (unlink), replacing the earlier design's two dedicated readers — a link scanner at the dispense box and a separate return scanner at the return drawer. Physically the reader sits at the bottom of an open middle section of the kiosk, so a card can be presented to it from either side. The dispense box and the return drawer remain separate motorised enclosures; only the reader is now shared.
 
 We chose this over two dedicated readers (one per interaction). It is fewer parts, one USB device for the Python core to grab and maintain, simpler wiring, and a single obvious tap point for the student. The trade-off is that the reader no longer encodes *intent*: with two readers the physical location told the kiosk whether a scan meant link or unlink, whereas a single tap is ambiguous on its own.
