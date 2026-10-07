@@ -114,6 +114,31 @@ async def read_uid_async(reader, timeout: float = 5.0) -> str | None:
     return result
 
 
+async def read_card_async(
+    uid_reader, student_reader, *, student_timeout: float = 10.0
+) -> tuple[str, str] | None:
+    """Wait for a UID, then a complete number; None means incomplete collection.
+
+    One caller owns both devices. Discard queued input BEFORE each UID attempt,
+    never after RF-off when the new number may already be arriving. This boundary
+    removes buffered input, but cannot prove same-card identity or exclude a swap.
+    Cancellation waits for the PN532 worker through read_uid_async().
+    """
+    while True:
+        while student_reader.read_one() is not None:
+            await asyncio.sleep(0)
+        uid = await read_uid_async(uid_reader)
+        if uid is not None:
+            break
+    print(f"UID received: {uid}")
+    print("Keep the card presented; waiting for student number...")
+    number = await read_student_number_async(student_reader, timeout=student_timeout)
+    if number is None:
+        return None
+    print(f"Student number received (unverified): {number}")
+    return uid, number
+
+
 @contextmanager
 def open_readers(device_path: str):
     """Context manager to open the PN532 and OMNIKEY readers."""

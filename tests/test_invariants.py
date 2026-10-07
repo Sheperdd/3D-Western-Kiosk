@@ -17,6 +17,7 @@ from kiosk.events import (
     BackendResult,
     BadScan,
     CancelSession,
+    CardRead,
     Effect,
     Event,
     FailureKind,
@@ -28,7 +29,6 @@ from kiosk.events import (
     RegisterAndActivate,
     Timeout,
     TimeoutName,
-    UidScan,
 )
 from kiosk.machine import Context, handle
 
@@ -47,8 +47,8 @@ EVENTS: list[Event] = [
         event
         for session in (0, 1, 2)
         for event in (
-            UidScan(session, UID),
-            UidScan(session, "0002ABCD"),
+            CardRead(session, UID, "000000001"),
+            CardRead(session, "0002ABCD", "000000001"),
             IdentityConfirmed(session, UID, "000000001"),
             IdentityConfirmed(session, "0002ABCD", "000000002"),
             BadScan(session, "ambiguous"),
@@ -66,18 +66,25 @@ EVENTS: list[Event] = [
 SCENARIOS: list[tuple[KioskState, Context]] = [(KioskState.OFFLINE, Context())]
 for trace in (
     [],
-    [UidScan(1, UID)],
-    [UidScan(1, UID), IDENTITY],
-    [UidScan(1, UID), BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)],
-    [UidScan(1, UID), IDENTITY, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)],
-    [UidScan(1, UID), BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED)],
-    [UidScan(1, UID), BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.MISSING_INDUCTION)],
+    [CardRead(1, UID, "000000001")],
+    [CardRead(1, UID, "000000001"), IDENTITY],
+    [CardRead(1, UID, "000000001"), BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)],
+    [
+        CardRead(1, UID, "000000001"),
+        IDENTITY,
+        BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED),
+    ],
+    [CardRead(1, UID, "000000001"), BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED)],
+    [
+        CardRead(1, UID, "000000001"),
+        BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.MISSING_INDUCTION),
+    ],
     [BackendOffline()],
     [ReaderFault(0, "unavailable")],
-    [UidScan(1, UID), CancelSession(1)],
-    [UidScan(1, UID), ReaderFault(1, "field timeout"), BackendOffline()],
+    [CardRead(1, UID, "000000001"), CancelSession(1)],
+    [CardRead(1, UID, "000000001"), ReaderFault(1, "field timeout"), BackendOffline()],
     [
-        UidScan(1, UID),
+        CardRead(1, UID, "000000001"),
         IDENTITY,
         BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED),
         Timeout(1, TimeoutName.SESSION),
@@ -116,7 +123,7 @@ def test_transition_invariants(state: KioskState, ctx: Context, event: Event) ->
         KioskState.AWAITING_IDENTITY,
         KioskState.REGISTERING,
     }:
-        assert new_ctx.uid is new_ctx.student_number is None
+        assert new_ctx.uid is new_ctx.observed_student_number is new_ctx.student_number is None
     if new_state == KioskState.IDLE:
         assert new_ctx.backend_online and new_ctx.reader_ready
         assert new_ctx.pending_op is None
@@ -134,6 +141,10 @@ def test_transition_invariants(state: KioskState, ctx: Context, event: Event) ->
     for effect in writes:
         assert ctx.backend_online and ctx.reader_ready
         assert effect.session_id == new_ctx.session_id
+        if isinstance(effect, ActivateUid):
+            assert isinstance(event, CardRead)
+            assert new_ctx.observed_student_number == event.student_number
+            assert len(event.student_number) == 9
         if isinstance(effect, RegisterAndActivate):
             assert effect.uid == new_ctx.uid
             assert effect.student_number == new_ctx.student_number

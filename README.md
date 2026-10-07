@@ -2,12 +2,12 @@
 
 A student-card registration and daily tool-access kiosk for 3D-Western. Students use their existing campus cards instead of borrowing separate RFID cards.
 
-**Status:** the pure Python core and tests now model student-card registration, replacement, and daily activation. The controller, real-reader integration, backend agreement, and displays are still pending; this is a tested starting point, not a working hardware kiosk. Start with [the implemented transitions and next work](docs/plan.md#7-core-migration-implemented-and-next-work), [glossary](CONTEXT.md), and [open questions](TODO.md).
+**Status:** the controller collects the UID and student number before starting simulated backend processing. Real backend integration, validated same-card identity, automatic reader rearming, and displays remain pending. Start with [the implemented transitions and next work](docs/plan.md#7-core-migration-implemented-and-next-work), [glossary](CONTEXT.md), and [open questions](TODO.md).
 
 ## Intended student flow
 
 1. **First registration:** present one student card to two adjacent readers. The PN532 reads the hexadecimal UID and disables its RF field; the OMNIKEY then reads the student number. The backend verifies the account, general induction, and eligibility before registering the association and activating the visit. Reliable same-card assurance remains to be established before production registration.
-2. **Repeat visits:** tap the UID reader once. The backend checks current eligibility and activates access. If already active, the kiosk confirms that status; it does not check the student out.
+2. **Repeat visits:** keep the card presented until both the UID and student number are collected, then begin backend processing. The backend checks current eligibility and activates access. If already active, the kiosk confirms that status; it does not check the student out.
 3. **Replacement card:** registration replaces the old UID association after verification, invalidates the old card's access, and activates the replacement.
 4. **Daily reset:** activation expires at midnight in America/Toronto. Registration remains, and an eligible student may immediately reactivate. One activation covers all participating tools; each tool still checks its own training requirements.
 
@@ -45,6 +45,8 @@ pytest tests/test_machine.py tests/test_invariants.py
 
 Run checks in the activated virtual environment. If Pyright cannot locate its interpreter, pass `--pythonpath .venv/Scripts/python.exe` on Windows (or `.venv/bin/python` on the Pi).
 
-The pure state machine uses `handle(state, context, event)` to return a new state, context, and effects without I/O. A UID starts backend activation; an unregistered UID proceeds to registration only with a controller-confirmed identity pair. Results and timers are scoped to the interaction. Lost write responses hold the machine in `OUTCOME_UNKNOWN`; reconnection alone does not release that hold.
+The pure state machine uses `handle(state, context, event)` to return a new state, context, and effects without I/O. A complete `CardRead` starts backend activation; an unregistered UID proceeds to registration only with a separately confirmed identity pair. Raw observed numbers cannot authorize registration or replacement. Results and timers are scoped to the interaction. Lost write responses hold the machine in `OUTCOME_UNKNOWN`; reconnection alone does not release that hold.
+
+For the current one-presentation hardware diagnostic, run `python -m kiosk --device /dev/input/eventX` on the Pi using the identified OMNIKEY path. Hold the card through the student-number beep. Both identifiers print before the simulated backend result. Missing student-number input expires after `STUDENT_NUMBER_TIMEOUT` (currently 10 seconds) with no backend call; restart for another attempt. Automatic rearming is deliberately disabled. These raw identifier prints are for local testing and must be removed or gated before production.
 
 The tests cover the core's decisions using synthetic events. They do not establish physical same-card assurance, backend persistence, replacement invalidation, midnight expiry, or tool enforcement. The internal event/effect names are provisional and do not specify network endpoints. See [plan section 7](docs/plan.md#7-core-migration-implemented-and-next-work) for controller obligations and integration work. Shane normally writes implementation with mentor support; this core migration was explicitly delegated.

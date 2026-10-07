@@ -49,15 +49,17 @@ class TimeoutName(StrEnum):
 
 
 @dataclass(frozen=True)
-class UidScan:
-    """A fresh presentation after the required RF commands were acknowledged.
+class CardRead:
+    """Both observed identifiers, after UID capture and acknowledged RF handover.
 
     Allocate increasing session IDs only when IDLE and ready; never reuse an ID.
     Further reads from that presentation retain its ID, including conflicting reads.
+    This is NOT proof that the identifiers belong to the same physical card.
     """
 
     session_id: int
     uid: str
+    student_number: str
 
 
 @dataclass(frozen=True)
@@ -75,7 +77,7 @@ class IdentityConfirmed:
 
 @dataclass(frozen=True)
 class BadScan:
-    """The current presentation is ambiguous/corrupt, not merely missing optional input."""
+    """The current attempt is incomplete or ambiguous; no new session ID is allocated."""
 
     session_id: int
     reason: str
@@ -138,7 +140,7 @@ class Timeout:
 
 
 Event = (
-    UidScan
+    CardRead
     | IdentityConfirmed
     | BadScan
     | CancelSession
@@ -168,24 +170,6 @@ class RegisterAndActivate:
 
 
 @dataclass(frozen=True)
-class CaptureIdentity:
-    """Schedule optional identity capture concurrently with UID activation, without blocking."""
-
-    session_id: int
-    uid: str
-
-
-@dataclass(frozen=True)
-class StopCapture:
-    """Discard this presentation's buffered input and rearm the readers safely.
-
-    Report any failure as ReaderFault. This does not cancel or undo a backend write.
-    """
-
-    session_id: int
-
-
-@dataclass(frozen=True)
 class StartTimeout:
     session_id: int
     name: TimeoutName
@@ -197,6 +181,4 @@ class CancelTimeout:
     name: TimeoutName
 
 
-Effect = (
-    ActivateUid | RegisterAndActivate | CaptureIdentity | StopCapture | StartTimeout | CancelTimeout
-)
+Effect = ActivateUid | RegisterAndActivate | StartTimeout | CancelTimeout

@@ -2,7 +2,7 @@ import argparse
 import asyncio
 
 from kiosk.controller import run
-from kiosk.events import BackendOnline, Event, IdentityConfirmed, ReaderReady, UidScan
+from kiosk.events import BackendOnline, CardRead, Event, IdentityConfirmed, ReaderReady
 
 
 async def main(device: str | None = None) -> None:
@@ -10,8 +10,8 @@ async def main(device: str | None = None) -> None:
     if device is None:
         queue.put_nowait(BackendOnline())
         queue.put_nowait(ReaderReady(0))
-        queue.put_nowait(UidScan(1, "1234567890"))
-        queue.put_nowait(IdentityConfirmed(1, "1234567890", "1234567890"))
+        queue.put_nowait(CardRead(1, "1234567890", "000123456"))
+        queue.put_nowait(IdentityConfirmed(1, "1234567890", "000123456"))
         await run(queue)
 
     else:

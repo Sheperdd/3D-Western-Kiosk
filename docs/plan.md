@@ -1,6 +1,6 @@
 # Student-card kiosk — Requirements and SDLC plan
 
-Updated 2026-09-16 following the requirements interview, reader experiments, and delegated core migration. **Current phase: the pure core and tests have been migrated; controller/backend integration and broader reader validation remain open.** This replaces the card-lending implementation plan. The requirements below describe the intended student-only v1; core test coverage is not evidence that the integrated kiosk is delivered.
+Updated 2026-10-07 for collect-both-before-backend ordering. **Current phase: the controller collects both identifiers before simulated backend processing; real backend integration and broader reader validation remain open.** This replaces the card-lending implementation plan. The requirements below describe the intended student-only v1; core test coverage is not evidence that the integrated kiosk is delivered.
 
 ## 1. Purpose, scope, and current state
 
@@ -10,7 +10,7 @@ The project delivers the kiosk and agrees its interface with the backend team. T
 
 V1 serves students only. Founder enrolment and access require a later requirements discussion; earlier ideas about personal founder RFID cards and backend provisioning remain provisional. Card dispensing, returns, iris and drawer motors, stock tracking, non-return flags, and the unlink outbox are outside current v1. Occupancy counting remains deferred.
 
-The events, pure state machine, and core tests in `kiosk/` and `tests/` now model the student-card flows described in section 7. Motor, stock, return, and temporary-link behavior has been removed from that core. No production controller, backend adapter, reader pairing mechanism, or display implementation has been added. The old [M1 roadmap](m1-roadmap.md) is historical, not the next work queue. [ADR-0005](adr/0005-student-card-registration-and-daily-activation.md) records the scope change.
+The events, pure state machine, and core tests in `kiosk/` and `tests/` now model the student-card flows described in section 7. Motor, stock, return, and temporary-link behavior has been removed from that core. The controller and shared hardware reader operations are integrated for one presentation per run. The backend is simulated; verified same-card identity, production rearming, and displays remain open. The old [M1 roadmap](m1-roadmap.md) is historical, not the next work queue. [ADR-0005](adr/0005-student-card-registration-and-daily-activation.md) records the scope change.
 
 ## 2. Confirmed requirements
 
@@ -19,7 +19,7 @@ The events, pure state machine, and core tests in `kiosk/` and `tests/` now mode
 | R1 | Registration is fully self-service and uses one physical student-card presentation. The PN532 first reads the hexadecimal UID; its RF field is then disabled so the OMNIKEY can read the student number. Both identifiers refer to the student's existing card, not a separate loan card. |
 | R2 | Before registering a UID, the backend must confirm an existing account, completed general induction, and eligibility under its access policy. The backend owns additional restrictions and supplies the denial reason. |
 | R3 | Successful registration also activates the visit. The kiosk displays success only after backend confirmation of activation. |
-| R4 | A returning student needs only one UID-reader tap. The backend resolves the registered card and checks current eligibility before activation. |
+| R4 | Every kiosk presentation, including a returning visit, must supply both the UID and student number before backend processing starts. The backend resolves the registered card and checks current eligibility before activation. Tool readers are unchanged. |
 | R5 | An eligible student whose visit is already active receives an “already active” confirmation. Repeated taps do not end the visit or remove registration. |
 | R6 | A replacement student card is registered automatically after successful identification and eligibility checks. It replaces the previous UID association, invalidates the old card's access, and activates the replacement in the same interaction. |
 | R7 | One activation is recognised across all participating tools without separate makerspace check-ins. Each tool still enforces its own training requirements. General induction does not grant permission to use every tool. |
@@ -39,7 +39,7 @@ These are acceptance scenarios for the integrated system. The revised core suite
 | Scenario | Required outcome | Requirements |
 |---|---|---|
 | Eligible first registration | One presentation yields both identifiers; confirmed registration and activation produce success. | R1–R3 |
-| Returning student | One registered UID tap checks current eligibility and activates access without needing the student-number reader. | R4 |
+| Returning student | One presentation supplies both identifiers before eligibility/activation processing. Missing either identifier starts no backend operation. | R4 |
 | Already-active student / repeated taps | Confirm the eligible active visit without checkout, unlinking, or duplicate visit creation. | R5 |
 | No account | Show signup QR; create no association or activation; rescan after signup. | R9 |
 | Missing induction | Show training QR; create no association or activation. | R10 |
@@ -96,19 +96,20 @@ Shane explicitly delegated this migration. `kiosk/events.py`, `kiosk/machine.py`
 
 ### Internal transitions
 
-UID-first routing attempts `ActivateUid` for every new interaction. The backend must resolve the registered holder, check current eligibility, and activate or confirm an already-active visit. `UNREGISTERED` is a no-write routing result, distinct from `UNKNOWN_STUDENT`.
+Collect-both routing attempts `ActivateUid` only after a complete `CardRead`. Its payload remains a UID; the ordering change does not establish a network schema. The backend must resolve the registered holder, check current eligibility, and activate or confirm an already-active visit. `UNREGISTERED` is a no-write routing result, distinct from `UNKNOWN_STUDENT`.
 
 | Current state | Fact received | Decision |
 |---|---|---|
-| `IDLE` | Fresh valid `UidScan` while both systems are ready | `ACTIVATING`; start the session deadline, schedule optional `CaptureIdentity`, and request `ActivateUid`. |
+| `IDLE` | Complete valid `CardRead` while both systems are ready | `ACTIVATING`; retain the observed pair separately from verified identity, start the backend session deadline, and request `ActivateUid`. |
+| `IDLE` | Incomplete collection (`BadScan` with the current session ID) | `RESULT` with `READ_AGAIN`; no backend operation. |
 | `ACTIVATING` | Matching `IdentityConfirmed` arrives early | Hold its verified pair while waiting for the UID decision. |
-| `ACTIVATING` | `ACTIVATED` or `ALREADY_ACTIVE` | `RESULT`; confirm the backend outcome, without waiting for a student number. |
+| `ACTIVATING` | `ACTIVATED` or `ALREADY_ACTIVE` | `RESULT`; confirm the backend outcome. Both reader values were collected before activation started. |
 | `ACTIVATING` | `UNREGISTERED` | `AWAITING_IDENTITY`, or immediately `REGISTERING` if the verified pair is already available. |
 | `AWAITING_IDENTITY` | Matching `IdentityConfirmed` | `REGISTERING`; request `RegisterAndActivate`. |
 | `REGISTERING` | `REGISTERED_AND_ACTIVE` or `REPLACED_AND_ACTIVE` | `RESULT`; success confirms the entire operation, including old-UID invalidation for replacement. |
 | Either backend wait | Account, induction, other policy denial, or UID conflict | `RESULT`; retain the outcome/reason code for display 1, clear identifiers, and issue no follow-up write. |
 | `AWAITING_IDENTITY` | Bad/conflicting data or session expiry | `RESULT` with `READ_AGAIN` or `SESSION_EXPIRED`; no registration request. Cancellation instead ends the interaction. |
-| Any active interaction | Backend outage or reader fault | Stop capture and clear identifiers. Block on the unavailable system, or enter `OUTCOME_UNKNOWN` if a write could be outstanding. |
+| Any active interaction | Backend outage or reader fault | Cancel acquisition and clear identifiers. Block on the unavailable system, or enter `OUTCOME_UNKNOWN` if a write could be outstanding. |
 | Backend wait | Lost response, cancellation, expiry, or contradictory capture | `OUTCOME_UNKNOWN`; retain the original operation reference without reporting success or retrying. |
 | `OUTCOME_UNKNOWN` | Authoritative valid result for the original operation | Clear the pending operation and return to the available resting state. Do not display the departed student's result or continue registration. |
 | `RESULT` | Matching result timeout/cancellation | Clear feedback and return to a resting state that respects current backend/reader availability. |
@@ -119,21 +120,21 @@ UID-first routing attempts `ActivateUid` for every new interaction. The backend 
 
 - Start with `KioskState.OFFLINE` and `Context()`. Both readiness flags default to false. Only emit `BackendOnline` and `ReaderReady(0)` after verifying readiness. During a running interaction, reader health events carry its current session ID. Health messages must describe current verified state, not a delayed command acknowledgement.
 - Allocate increasing, non-reused session IDs for fresh presentations only when the machine is idle and ready. Duplicate or conflicting reads from the current presentation keep that presentation's ID. Discard old buffered input and wait for a genuinely fresh presentation before allocating another ID; a fixed sleep is not a card-removal detector. The core retains the last ID after cleanup and ignores older scoped events.
-- Emit `UidScan` only after the required UID capture and RF handover commands have been acknowledged. `CaptureIdentity` schedules bounded, optional student-number capture while UID activation proceeds. It must not block the effect loop or require returning students to supply a number. An absent optional number is not a `BadScan`; that event means the current presentation is corrupt or ambiguous.
+- A single `read_card_async` operation owns both devices: discard queued OMNIKEY input before each UID attempt, obtain the UID and RF-off acknowledgement, then parse a complete student number. Never drain after RF-off; the new number may already be buffered. Waiting for a card is separate from the bounded student-number wait. Emit `CardRead` only after both values arrive. Missing/invalid input starts no backend operation. Pre-session failures use the current session ID.
 - `IdentityConfirmed` is a trusted assertion that the UID and student number belong to the same physical card. Correlation tokens and timing do not establish that fact. Its hardware mechanism is still unresolved; the tests supply synthetic confirmed events and are not physical pairing evidence. Do not turn raw OMNIKEY digits into this event merely because a UID was recently read.
-- Serialize events through `handle`. Start timers and schedule I/O without blocking it. Before dispatching a deferred effect, verify that it is still current. Execute each backend operation at most once per `(session_id, op)` and echo that reference in results/errors. `StopCapture` discards session input and safely rearms the readers; a command failure must produce `ReaderFault`. Do not automatically retry writes.
+- Serialize events through `handle`. Start timers and schedule I/O without blocking it. Execute each backend operation at most once per `(session_id, op)` and echo that reference in results/errors. Readiness loss or cancellation revokes scan admission, including already queued results; shutdown awaits acquisition cleanup before devices close. There is no separate capture effect. Automatic rearming is disabled: restart the current diagnostic for another presentation. Do not automatically retry writes.
 - `RegisterAndActivate` is one logical request for eligible registration or replacement plus activation. Its backend implementation, concurrency semantics, and atomicity are not agreed. Success means the whole operation is confirmed. Denial and `UNREGISTERED` mean no write occurred; partial completion or an unconfirmed outcome must not be mapped to either success or a clean denial.
 - `BackendError` defaults to `FailureKind.UNKNOWN`. Use `NOT_SENT` only when the controller knows the request was never sent. Connectivity or reader recovery cannot clear an unresolved operation. A delayed authoritative result can settle the original operation, but obtaining that result when the response is permanently lost still needs a backend recovery contract.
 - The core is in memory only. Restart recovery, durable operation references, idempotency across processes, and readiness after a crash remain integration work. A health probe or a restart is not evidence that a previous write was undone. Internal integer session IDs are not a production backend idempotency scheme.
-- Configure bounded session and feedback durations in the future controller. The session timer spans activation routing and registration; it is not restarted on phase changes. Timer callbacks carry both session ID and name. No kiosk timer expires registrations or implements the daily access reset.
+- The controller has separate student-number, backend-session, and feedback durations. The backend-session timer begins only after complete collection and spans activation routing and registration without restarting on phase changes. Timer callbacks carry both session ID and name. No kiosk timer expires registrations or implements the daily access reset.
 - Context holds current-student information only while needed; terminal decisions clear UID and student number. Display 1 can consume approved feedback. Display 2 must use general instructions and system health only, never serialize the entire context or raw backend reason content. Detailed UI/privacy rules remain open.
 
 ### Next work
 
 1. Agree the actual backend operations, denial mapping, write guarantees, and recovery/retry behavior with the backend/tool team. Keep the core's logical names separate from any eventual endpoint or payload schema.
-2. Obtain Shane's current combined Pi script. Establish same-card assurance, fresh-presentation detection, bounded waits, and recovery from RF command failure; then implement the controller that executes the existing effects. The workspace probe remains student-number-only and has not been changed by this migration.
+2. Validate the integrated collect-both ordering on the Pi. Establish same-card assurance, fresh-presentation detection/rearming, and recovery from RF command failure. The controller uses the shared reader operations with a simulated backend; the combined probe remains a separate diagnostic.
 3. Build the two displays around their agreed roles, including signup/training QR codes, backend denials, offline status, reader faults, and unknown outcomes. No student-number input or staff approval step is required for routine enrollment.
 4. Run the section 3 acceptance scenarios with real readers and the backend. Backend/tool tests must establish old-card invalidation, no duplicate visits, midnight expiry across daylight-saving changes, and tool-specific training enforcement. The core tests verify request/result handling, not those remote behaviors.
-5. Use the focused pytest suite plus Ruff and Pyright as the core development baseline. The tests exercise both identifier arrival orders, returning UID-only activation, replacement confirmation, denials, repeated input, cancellation, expiry, stale results, mixed identifiers, reader faults, and uncertain writes. The invariant sweep uses reachable contexts and verifies coverage of every current state and event type.
+5. Use the focused pytest suite plus Ruff and Pyright as the core development baseline. Tests cover collection before activation, buffered/handover input, invalid and missing numbers, confirmation before/after the backend reply, replacement, denials, repeated input, cancellation, expiry, stale results, mixed identifiers, reader faults, and uncertain writes. The invariant sweep uses reachable contexts and verifies coverage of every current state and event type.
 
 This is a starting point for integration and continued development. Backend contract gaps, same-card assurance, timing values, production recovery, and broader hardware validation remain open.

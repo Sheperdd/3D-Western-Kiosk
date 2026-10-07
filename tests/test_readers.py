@@ -42,6 +42,9 @@ def input_device(monkeypatch: pytest.MonkeyPatch):
         def read_loop(self):
             return iter(self.events)
 
+        def read_one(self):
+            return self.events.pop(0) if self.events else None
+
         def async_read_loop(self):
             return self
 
@@ -75,6 +78,78 @@ def test_async_student_number_reuses_sync_parsing_and_key_filtering(input_device
         assert await readers.read_student_number_async(device) == "000123456"
         assert device.removed == [device.fileno()]
         assert len(device.events) == 10
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize(
+    "scan", ["000123456\n000123456\n", "", "000123456", "123?56789\n", "1234567890\n"]
+)
+def test_card_read_drains_before_uid_and_preserves_handover_input(input_device, scan) -> None:
+    async def check() -> None:
+        device = input_device()
+        device.feed("000999999\n")  # Buffered before this attempt, never accepted.
+        commands = []
+        polls = 0
+
+        class UidReader:
+            def call_function(self, command, *, params, response_length):
+                assert command == 0x32 and response_length == 0
+                commands.append(params)
+                if params == b"\x01\x03":
+                    assert not device.events  # Also drained before the second UID poll.
+                elif polls == 1:
+                    device.feed("000888888\n")  # No UID: discard before the next attempt.
+                else:
+                    device.feed(scan)  # Arrives during RF-off, before its await returns.
+                return b""
+
+            def read_passive_target(self, *, timeout):
+                nonlocal polls
+                polls += 1
+                return None if polls == 1 else bytes.fromhex("0001ABCD")
+
+        pair = await asyncio.wait_for(
+            readers.read_card_async(UidReader(), device, student_timeout=0.01), 1
+        )
+        assert pair == (("0001ABCD", "000123456") if scan.startswith("000123456\n") else None)
+        assert commands == [b"\x01\x03", b"\x01\x02"] * 2
+        assert device.removed == [device.fileno()]
+        if pair is not None:
+            assert len(device.events) == 10  # Duplicate did not become another acquisition.
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("failure_at", ["field-on", "uid", "field-off", "drain"])
+def test_card_read_propagates_reader_failures_without_a_pair(input_device, failure_at) -> None:
+    async def check() -> None:
+        device = input_device()
+        commands = []
+
+        class UidReader:
+            def call_function(self, command, *, params, response_length):
+                commands.append(params)
+                if (failure_at == "field-on" and params == b"\x01\x03") or (
+                    failure_at == "field-off" and params == b"\x01\x02"
+                ):
+                    return None
+                return b""
+
+            def read_passive_target(self, *, timeout):
+                if failure_at == "uid":
+                    raise RuntimeError("UID failed")
+                return bytes.fromhex("0001ABCD")
+
+        def fail_drain():
+            raise RuntimeError("Drain failed")
+
+        if failure_at == "drain":
+            device.read_one = fail_drain
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(readers.read_card_async(UidReader(), device), 1)
+        assert commands == ([] if failure_at == "drain" else [b"\x01\x03", b"\x01\x02"])
+        assert not device.waiting.is_set()
 
     asyncio.run(check())
 

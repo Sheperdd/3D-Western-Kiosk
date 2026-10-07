@@ -13,7 +13,7 @@ from kiosk.events import (
     BadScan,
     CancelSession,
     CancelTimeout,
-    CaptureIdentity,
+    CardRead,
     Effect,
     Event,
     FailureKind,
@@ -24,10 +24,8 @@ from kiosk.events import (
     ReaderReady,
     RegisterAndActivate,
     StartTimeout,
-    StopCapture,
     Timeout,
     TimeoutName,
-    UidScan,
 )
 
 
@@ -36,6 +34,8 @@ class Context:
     # Keep the last session ID after cleanup to reject delayed/repeated presentations.
     session_id: int = 0
     uid: str | None = None
+    observed_student_number: str | None = None
+    # Only IdentityConfirmed may populate this trusted registration input.
     student_number: str | None = None
     pending_op: BackendOp | None = None
     outcome: Outcome | None = None
@@ -85,7 +85,6 @@ def _end_session(ctx: Context, *, keep_pending: bool = False) -> tuple[Context, 
     if ctx.uid is not None:
         effects = [
             CancelTimeout(ctx.session_id, TimeoutName.SESSION),
-            StopCapture(ctx.session_id),
         ]
     if ctx.outcome is not None:
         effects.append(CancelTimeout(ctx.session_id, TimeoutName.RESULT))
@@ -93,6 +92,7 @@ def _end_session(ctx: Context, *, keep_pending: bool = False) -> tuple[Context, 
         replace(
             ctx,
             uid=None,
+            observed_student_number=None,
             student_number=None,
             pending_op=ctx.pending_op if keep_pending else None,
             outcome=None,
@@ -143,21 +143,30 @@ def handle(
         ctx = replace(ctx, backend_online=True)
         return (_resting_state(ctx) if state in _RESTING else state), ctx, []
 
-    if isinstance(event, UidScan) and state == KioskState.IDLE:
+    if isinstance(event, CardRead) and state == KioskState.IDLE:
         if event.session_id <= ctx.session_id:
             return state, ctx, []
         if _resting_state(ctx) != KioskState.IDLE:
             return _resting_state(ctx), ctx, []
         uid = event.uid.upper()
-        ctx = replace(ctx, session_id=event.session_id, uid=uid)
-        if not _valid_uid(event.uid):
+        ctx = replace(
+            ctx,
+            session_id=event.session_id,
+            uid=uid,
+            observed_student_number=event.student_number,
+        )
+        if (
+            not _valid_uid(event.uid)
+            or len(event.student_number) != 9
+            or not event.student_number.isascii()
+            or not event.student_number.isdecimal()
+        ):
             return _finish(ctx, Outcome.READ_AGAIN)
         return (
             KioskState.ACTIVATING,
             replace(ctx, pending_op=BackendOp.ACTIVATE_UID),
             [
                 StartTimeout(ctx.session_id, TimeoutName.SESSION),
-                CaptureIdentity(ctx.session_id, uid),
                 ActivateUid(ctx.session_id, uid),
             ],
         )
@@ -171,6 +180,9 @@ def handle(
     if isinstance(event, ReaderReady):
         ctx = replace(ctx, reader_ready=True)
         return (_resting_state(ctx) if state in _RESTING else state), ctx, []
+
+    if isinstance(event, BadScan) and state == KioskState.IDLE:
+        return _finish(ctx, Outcome.READ_AGAIN, event.reason)
 
     if isinstance(event, (BackendResult, BackendError)):
         if ctx.pending_op != event.op or state not in {
@@ -223,6 +235,7 @@ def handle(
             or event.uid.upper() != ctx.uid
             or not event.student_number.isascii()
             or not event.student_number.isdecimal()
+            or event.student_number != ctx.observed_student_number
             or ctx.student_number not in (None, event.student_number)
         ):
             if ctx.pending_op is not None:
@@ -233,7 +246,10 @@ def handle(
             return _register(ctx)
         return state, ctx, []
 
-    if isinstance(event, BadScan) or (isinstance(event, UidScan) and event.uid.upper() != ctx.uid):
+    if isinstance(event, BadScan) or (
+        isinstance(event, CardRead)
+        and (event.uid.upper() != ctx.uid or event.student_number != ctx.observed_student_number)
+    ):
         if ctx.pending_op is not None:
             return _abort(ctx)
         return _finish(ctx, Outcome.READ_AGAIN)

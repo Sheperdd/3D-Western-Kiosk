@@ -68,7 +68,7 @@ sudo evtest --grab /dev/input/eventX
 
 Inspect key names, timestamps, and event values: press = 1, release = 0, repeat = 2. Record terminators, modifiers, prefixes, and leading zeros. Nine digits followed by Enter were observed on the tested card; this is not a universal student-number specification.
 
-For the PN532, use the SPI diagnostic in Shane's current combined Pi script. Record initialization, firmware response, UID bytes, and RF command acknowledgements. Display UIDs as uppercase hexadecimal with leading zeros preserved. The workspace's `tools/student_number_probe.py` is OMNIKEY-only; obtain the current Pi file before adapting driver logic and preserve Shane's Pi changes.
+For the PN532, use the SPI diagnostic in Shane's current combined Pi script. Record initialization, firmware response, UID bytes, and RF command acknowledgements. Display UIDs as uppercase hexadecimal with leading zeros preserved. The workspace's combined probe uses the shared reader operations; preserve any newer Pi changes before updating it.
 
 Test each reader independently before the combined sequence. The libraries and connection methods differ; only the OMNIKEY needs a keyboard-character buffer.
 
@@ -95,7 +95,7 @@ A three-second diagnostic pause is not a card-removal detector or an agreed prod
 2. Repeat across several student cards. Record formats, leading zeros, lengths, UID consistency, and whether both reads complete without lifting the card.
 3. Lift and retap, then hold the card in place to observe repeat output. Establish evidence for detecting a genuinely fresh presentation.
 4. Remove card A after its UID is read and present card B. Record missing, overlapping, buffered, or late output; never treat A's UID and B's student number as a confirmed pair.
-5. Exercise missing student-number output, interruption, cancellation, and expired capture. Old buffered input must not leak into the next interaction. Returning UID-only activation must not depend on obtaining a student number.
+5. Exercise missing student-number output, interruption, cancellation, and expired collection. Old buffered input must not leak into the next interaction. Every kiosk visit requires both identifiers before processing; a missing number must cause no activation or registration.
 6. Reconnect the USB OMNIKEY and restart the Pi/PN532 diagnostic, then repeat. Re-identify the OMNIKEY input path and verify PN532 readiness separately.
 7. Exercise field-on and field-off command failures with bounded waits and diagnostic logging. Missing acknowledgement must not permit registration/activation success or continued pairing with uncertain reader state; recovery policy still needs agreement.
 8. Run repeated presentations long enough to investigate the reported intermittent failure after roughly a minute: field-on received no confirmation, followed by field-off cleanup also receiving no confirmation. Later one-tap success did not establish a root cause or prove that failure fixed.
@@ -104,9 +104,11 @@ Keep a small record of reader models, SPI wiring/switches, software versions, ca
 
 ## 5. Before connecting the readers to the controller
 
-Use the current combined Pi diagnostic as the starting point, separate from the student-card state machine. It reads PN532 UID bytes through SPI and OMNIKEY characters through Linux input events, following the RF handover above. Keep repeated scans visible during diagnosis. Do not overwrite the combined Pi file with the workspace's older OMNIKEY-only probe.
+Use the current combined Pi diagnostic as the starting point, separate from the student-card state machine. It reads PN532 UID bytes through SPI and OMNIKEY characters through Linux input events, following the RF handover above. Keep repeated scans visible during diagnosis. Preserve any newer Pi changes before updating the diagnostic.
 
-Before production integration, establish same-card assurance, fresh-presentation detection, bounded waits, stale-input disposal, and recovery from RF command failure. Only emit `UidScan` after the required UID capture and RF handover commands are acknowledged. `IdentityConfirmed` must represent verified same-card evidence, not two values grouped by timing or session ID. `StopCapture` must discard session input and safely rearm the readers; failures must produce `ReaderFault`.
+The integrated diagnostic now runs with `python -m kiosk --device /dev/input/eventX`. It discards queued OMNIKEY input before the UID attempt, preserves input arriving during RF-off, and emits `CardRead` only after UID/RF acknowledgement and a complete student number. Missing the number produces retry feedback and no backend call. The backend remains simulated, and automatic rearming is disabled; restart for each presentation. Test this path independently of the probe, whose post-handover drain and repeat delay are experimental.
+
+Before production integration, establish same-card assurance, fresh-presentation detection, and recovery from RF command failure. `IdentityConfirmed` must represent verified same-card evidence, not two values grouped by timing or session ID. Raw `CardRead` values never establish a trusted association. Cancellation must finish reader cleanup before devices close; device/command failures must produce `ReaderFault`.
 
 These diagnostics must not register cards, replace cards, or activate visits. Reader evidence is separate from backend acceptance. The plan does not establish that the OMNIKEY can also supply a matching UID or that student numbers can be mathematically converted to UIDs.
 

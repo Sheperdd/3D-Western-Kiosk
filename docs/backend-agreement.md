@@ -5,6 +5,8 @@
 **Meeting date / attendees:** to fill in.  
 **Kiosk lead:** Shane. **Backend and tool leads:** to confirm.
 
+**Kiosk update, 2026-10-07:** collect both UID and student number before starting any backend processing, including returning visits. The internal `ActivateUid` operation still takes a UID; requiring collection of both does not settle the eventual network payload or permit unverified association changes. `RegisterAndActivate` still requires verified same-card identity. Tool-reader behavior is unchanged.
+
 ## TL;DR — meeting overview
 
 **The ask:** adapt ops from lending makerspace cards to registering students' own cards and activating daily access. Reuse existing account lookup, training records, visits, and authentication. The kiosk API, stored card ownership, tool authorization, and midnight cleanup all need coordinated changes.
@@ -14,7 +16,7 @@
 ### What the student experience must be
 
 - **First use:** one card presentation supplies a card UID [the card's identifier] and student number. The backend checks the account, general induction, and eligibility, then registers the card and activates access.
-- **Later visits:** a UID-only tap checks eligibility again and activates access or confirms it is already active. Repeated taps never check the student out or create duplicate visits.
+- **Later visits:** collect both identifiers from one presentation, then check eligibility and activate access or confirm it is already active. Repeated taps never check the student out or create duplicate visits.
 - **Replacement:** a verified replacement registers and activates the new card, and the old card loses access. A replaced card must not accidentally register itself again.
 - **Midnight:** activation expires at midnight in Toronto; registration stays. Eligible students can reactivate immediately. Tools must reject expired access even if the cleanup job does not run.
 - **Tools and refusals:** one activation works across participating tools, but each tool still checks its required training and availability. Missing accounts or induction lead to the appropriate signup/training QR. Other denials need clear backend reasons. The kiosk never reports success without backend confirmation.
@@ -41,7 +43,7 @@ Backend tests and real integration checks must prove registration, UID-only acti
 
 ---
 
-The kiosk needs ops to maintain a persistent student-card registration and a separate daily activation. A student registers once, then uses a UID-only tap to activate later visits. Each interaction requires an authoritative backend decision before the kiosk displays success.
+The kiosk needs ops to maintain a persistent student-card registration and a separate daily activation. A student registers once, then presents their card for both reads before later activation requests. Each interaction requires an authoritative backend decision before the kiosk displays success.
 
 Leave the meeting with three things: a list of existing capabilities to reuse and changes to make, an agreed meaning for each operation/result, and owners and dates for the remaining work.
 
@@ -56,7 +58,7 @@ The kiosk's current operation names are internal vocabulary, not approved endpoi
 These requirements come from the [project plan](plan.md#2-confirmed-requirements). Backend implementation and interface details remain to be agreed in this meeting.
 
 - **First registration:** one student-card presentation supplies its UID and student number. Ops verifies an existing account, general induction, and current eligibility before registering and activating it.
-- **Returning student:** the UID alone resolves the student. Ops rechecks current eligibility, then activates or confirms an already-active visit. Repeated taps do not check anyone out.
+- **Returning student:** the kiosk first collects both identifiers. The activation operation resolves the registered UID and rechecks current eligibility, then activates or confirms an already-active visit. Repeated taps do not check anyone out.
 - **Replacement:** after identity and eligibility checks, the new UID replaces the previous one, the old card loses access, and the new card is activated in the same interaction.
 - **Daily reset:** activations expire at 00:00 America/Toronto. Registration remains. An eligible student may immediately reactivate; midnight is not an opening-hours restriction.
 - **Tools:** one active visit is recognised across participating tools. Each tool still requires its own training; general induction alone does not authorise every tool.
@@ -218,7 +220,7 @@ These checks must run against the actual backend/test environment and, where sta
 | Check | Evidence needed |
 |---|---|
 | Eligible first registration | The submitted student resolves to an account; one current association and an active visit are confirmed. |
-| Returning UID-only tap | A registered UID works without a student-number read and checks current eligibility. |
+| Returning kiosk presentation | Both identifiers are collected before activation; a UID alone causes zero backend calls. The activation operation resolves the registered UID and checks current eligibility. |
 | Repeated taps and concurrent duplicates | Eligible active students receive confirmation; requests do not create duplicate visits or repeat association changes. |
 | Unknown student / missing induction / other denial | Correct outcome and reason mapping; no registration, revocation, or activation change from the denied attempt. |
 | Eligibility changes after an earlier success | Already-active confirmation and a later registration attempt recheck eligibility. A previous successful account/induction lookup is not blanket approval. |

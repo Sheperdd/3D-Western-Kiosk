@@ -13,6 +13,8 @@ This removes the lending hardware and daily card-handling burden, but makes reli
 
 ## Effect on earlier decisions
 
+**2026-10-07 amendment:** the kiosk now requires both the UID and student number before any backend processing, including returning visits. This supersedes the UID-only kiosk interaction above. Collection follows UID capture, acknowledged RF-off, then a complete student number. An observed pair is not verified same-card identity and cannot authorize registration or replacement. The internal activation request still takes a UID; this ordering decision does not settle the backend payload or change tool-reader behavior. The current hardware diagnostic permits one presentation per run until card-removal/rearming rules are validated.
+
 - **ADR-0001:** supersedes the kiosk's lending-lifecycle responsibility; backend authority and tool-side enforcement remain.
 - **ADR-0002:** supersedes the checkout/return asymmetry, unlink outbox, and nightly unlink. Both registration and activation require backend confirmation; the daily reset expires activations only.
 - **ADR-0003:** supersedes motor/lending interaction assumptions. The Python core, Chromium web UI, and scan-driven output-only direction remain; the current plan assigns student interaction to display 1 and general instructions/system status to display 2.

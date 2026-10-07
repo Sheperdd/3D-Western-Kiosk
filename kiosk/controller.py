@@ -6,24 +6,23 @@ from kiosk.events import (
     BackendError,
     BackendOp,
     BackendResult,
+    BadScan,
+    CancelSession,
     CancelTimeout,
-    CaptureIdentity,
+    CardRead,
     Effect,
     Event,
     FailureKind,
-    IdentityConfirmed,
     KioskState,
     Outcome,
     ReaderFault,
     RegisterAndActivate,
     StartTimeout,
-    StopCapture,
     Timeout,
     TimeoutName,
-    UidScan,
 )
 from kiosk.machine import Context, handle
-from kiosk.readers import read_student_number_async, read_uid_async
+from kiosk.readers import read_card_async
 
 
 async def fire_timeout(queue: asyncio.Queue[Event], effect: StartTimeout, seconds: float) -> None:
@@ -76,42 +75,13 @@ async def fake_register_and_activate(
         )
 
 
-async def fake_capture_identity(
-    queue: asyncio.Queue[Event],
-    effect: CaptureIdentity,
-    seconds: float,
-    student_number: str,
-) -> None:
-    try:
-        await asyncio.sleep(seconds)
-        await queue.put(IdentityConfirmed(effect.session_id, effect.uid, student_number))
-    except Exception as e:
-        logging.exception("Capture identity request failed with exception: %s", e)
-        await queue.put(
-            ReaderFault(effect.session_id, f"Capture identity request failed with exception: {e}")
-        )
-
-
-async def capture_student_number(
-    queue: asyncio.Queue[Event], effect: CaptureIdentity, student_reader
-) -> None:
-    try:
-        number = await read_student_number_async(
-            student_reader, timeout=DEMO_TIMEOUT_SECONDS[TimeoutName.SESSION]
-        )
-        if number is not None:
-            print(f"Student number received (unverified): {number}")
-    except Exception as error:
-        logging.exception("Student-number capture failed")
-        queue.put_nowait(ReaderFault(effect.session_id, f"Student-number capture failed: {error}"))
-
-
 # Laptop demo settings; production durations still need agreement.
 DEMO_TIMEOUT_SECONDS: dict[TimeoutName, float] = {
     TimeoutName.SESSION: 10.0,
     TimeoutName.RESULT: 2.0,
 }
 DEMO_BACKEND_DELAY = 0.001
+STUDENT_NUMBER_TIMEOUT = 10.0  # After UID/RF handover; waiting for a card has no deadline.
 
 
 def dispatch(
@@ -119,10 +89,8 @@ def dispatch(
     effect: Effect,
     timers: dict[tuple[int, TimeoutName], asyncio.Task[None]],
     background_tasks: set[asyncio.Task[None]],
-    capture_tasks: dict[int, asyncio.Task[None]],
     *,
     hardware_mode: bool = False,
-    student_reader=None,
 ) -> None:
     if isinstance(effect, StartTimeout):
         if (effect.session_id, effect.name) in timers:
@@ -154,26 +122,6 @@ def dispatch(
         background_tasks.add(backend_task)
         backend_task.add_done_callback(background_tasks.discard)
 
-    elif isinstance(effect, CaptureIdentity):
-        if hardware_mode:
-            capture_task = asyncio.create_task(
-                capture_student_number(queue, effect, student_reader)
-            )
-        else:
-            capture_task = asyncio.create_task(
-                fake_capture_identity(
-                    queue, effect, DEMO_BACKEND_DELAY, student_number="1234567890"
-                )
-            )
-        background_tasks.add(capture_task)
-        capture_task.add_done_callback(background_tasks.discard)
-        capture_tasks[effect.session_id] = capture_task
-
-    elif isinstance(effect, StopCapture):
-        if effect.session_id in capture_tasks:
-            capture_tasks[effect.session_id].cancel()
-            del capture_tasks[effect.session_id]
-
     print(type(effect).__name__)
 
 
@@ -193,37 +141,50 @@ async def run(
         tuple[int, TimeoutName], asyncio.Task[None]
     ] = {}  # session_id, timeout_name -> task
     background_tasks: set[asyncio.Task[None]] = set()
-    capture_tasks: dict[int, asyncio.Task[None]] = {}  # session_id -> task
-    uid_task: asyncio.Task[None] | None = None
-    acquired_uid: UidScan | None = None
-    uid_admission_revoked = False
+    # ponytail: one presentation per run; add rearming only with validated card removal.
+    acquisition_task: asyncio.Task[None] | None = None
+    acquired_scan: CardRead | BadScan | None = None
+    admission_revoked = False
 
-    async def acquire_uid() -> None:
-        nonlocal acquired_uid
+    async def acquire_card() -> None:
+        nonlocal acquired_scan
         session_id = context.session_id
         try:
-            while state == KioskState.IDLE and context.reader_ready:
-                uid = await read_uid_async(uid_reader)
-                if (
-                    state != KioskState.IDLE
-                    or not context.reader_ready
-                    or context.session_id != session_id
-                ):
-                    return
-                if uid is not None:
-                    print(f"UID received: {uid}")
-                    acquired_uid = UidScan(session_id + 1, uid)
-                    queue.put_nowait(acquired_uid)
-                    return
+            pair = await read_card_async(
+                uid_reader, student_reader, student_timeout=STUDENT_NUMBER_TIMEOUT
+            )
+            if (
+                admission_revoked
+                or state != KioskState.IDLE
+                or not context.reader_ready
+                or not context.backend_online
+                or context.session_id != session_id
+            ):
+                return
+            if pair is None:
+                reason = (
+                    "Incomplete scan: student number missing. Restart and present the card again."
+                )
+                print(reason)
+                acquired_scan = BadScan(session_id, reason)
+            else:
+                acquired_scan = CardRead(session_id + 1, *pair)
+            queue.put_nowait(acquired_scan)
         except Exception as error:
-            logging.exception("UID acquisition failed")
+            logging.exception("Card acquisition failed")
             queue.put_nowait(ReaderFault(context.session_id, str(error)))
 
     try:
         while True:
             event = await queue.get()
-            if event is acquired_uid and uid_admission_revoked:
+            if event is acquired_scan and admission_revoked:
                 continue
+            if (
+                acquisition_task is not None
+                and isinstance(event, CancelSession)
+                and event.session_id == context.session_id
+            ):
+                admission_revoked = True
             print("Processing event:", type(event).__name__)
             state, context, effects = handle(state, context, event)
             print("State: ", state.name, "Outcome: ", context.outcome)
@@ -233,21 +194,20 @@ async def run(
                     effect,
                     timers,
                     background_tasks,
-                    capture_tasks,
                     hardware_mode=hardware_mode,
-                    student_reader=student_reader,
                 )
             if hardware_mode:
-                if state == KioskState.IDLE and context.reader_ready:
-                    if uid_task is None:
-                        uid_task = asyncio.create_task(acquire_uid())
-                        background_tasks.add(uid_task)
-                        uid_task.add_done_callback(background_tasks.discard)
-                elif uid_task is not None:
-                    uid_admission_revoked = True
-                    if not uid_task.done() and uid_task.cancelling() == 0:
-                        uid_task.cancel()
+                if state == KioskState.IDLE and context.reader_ready and not admission_revoked:
+                    if acquisition_task is None:
+                        acquisition_task = asyncio.create_task(acquire_card())
+                        background_tasks.add(acquisition_task)
+                        acquisition_task.add_done_callback(background_tasks.discard)
+                elif acquisition_task is not None:
+                    admission_revoked = True
+                    if not acquisition_task.done() and acquisition_task.cancelling() == 0:
+                        acquisition_task.cancel()
     finally:
+        admission_revoked = True
         background_snapshot = list(background_tasks)
         for task in background_snapshot:
             if not task.done() and task.cancelling() == 0:

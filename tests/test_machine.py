@@ -9,7 +9,7 @@ from kiosk.events import (
     BackendResult,
     BadScan,
     CancelSession,
-    CaptureIdentity,
+    CardRead,
     Event,
     FailureKind,
     IdentityConfirmed,
@@ -19,10 +19,8 @@ from kiosk.events import (
     ReaderReady,
     RegisterAndActivate,
     StartTimeout,
-    StopCapture,
     Timeout,
     TimeoutName,
-    UidScan,
 )
 from kiosk.machine import Context, handle
 
@@ -34,7 +32,7 @@ IDENTITY = IdentityConfirmed(1, UID, STUDENT)
 
 
 def start():
-    return handle(KioskState.IDLE, READY, UidScan(1, UID))
+    return handle(KioskState.IDLE, READY, CardRead(1, UID, "000000001"))
 
 
 def awaiting_identity():
@@ -56,27 +54,52 @@ def test_startup_requires_both_backend_and_reader_readiness(backend_first: bool)
     if not backend_first:
         events.reverse()
     for event in events:
-        assert handle(state, ctx, UidScan(1, UID)) == (state, ctx, [])
+        assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
         state, ctx, effects = handle(state, ctx, event)
         assert effects == []
     assert (state, ctx) == (KioskState.IDLE, READY)
 
 
-def test_uid_starts_activation_and_optional_identity_capture_without_losing_leading_zeros() -> None:
-    state, ctx, effects = handle(KioskState.IDLE, READY, UidScan(1, UID.lower()))
+def test_complete_pair_starts_activation_without_confirming_identity() -> None:
+    state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, UID.lower(), "000000001"))
     assert state == KioskState.ACTIVATING
     assert ctx.uid == UID
+    assert ctx.observed_student_number == STUDENT
     assert ctx.student_number is None
     assert ctx.pending_op == BackendOp.ACTIVATE_UID
     assert effects == [
         StartTimeout(1, TimeoutName.SESSION),
-        CaptureIdentity(1, UID),
         ActivateUid(1, UID),
     ]
 
 
+@pytest.mark.parametrize("student", ["", "123", "1234567890", "123?56789", "１２３４５６７８９"])
+def test_incomplete_or_invalid_pair_never_starts_backend(student: str) -> None:
+    state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, UID, student))
+    assert state == KioskState.RESULT
+    assert ctx.outcome == Outcome.READ_AGAIN
+    assert ctx.uid is ctx.observed_student_number is ctx.student_number is ctx.pending_op is None
+    assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
+
+
+def test_confirmation_must_match_observed_pair() -> None:
+    state, ctx, _ = awaiting_identity()
+    state, ctx, effects = handle(state, ctx, IdentityConfirmed(1, UID, "000000002"))
+    assert state == KioskState.RESULT
+    assert ctx.outcome == Outcome.READ_AGAIN
+    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
+
+
+def test_conflicting_raw_number_during_activation_cannot_become_trusted() -> None:
+    state, ctx, _ = start()
+    state, ctx, effects = handle(state, ctx, CardRead(1, UID, "000000002"))
+    assert state == KioskState.OUTCOME_UNKNOWN
+    assert ctx.observed_student_number is ctx.student_number is None
+    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
+
+
 @pytest.mark.parametrize("outcome", [Outcome.ACTIVATED, Outcome.ALREADY_ACTIVE])
-def test_returning_student_needs_only_uid_and_every_new_tap_rechecks_backend(
+def test_returning_student_supplies_both_and_every_new_tap_rechecks_backend(
     outcome: Outcome,
 ) -> None:
     state, ctx, _ = start()
@@ -84,15 +107,14 @@ def test_returning_student_needs_only_uid_and_every_new_tap_rechecks_backend(
     assert state == KioskState.RESULT
     assert ctx.outcome == outcome
     assert ctx.uid is ctx.student_number is ctx.pending_op is None
-    assert StopCapture(1) in effects
     assert StartTimeout(1, TimeoutName.RESULT) in effects
 
     # A held/repeated read cannot retrigger activation or extend the result timer.
-    assert handle(state, ctx, UidScan(1, UID)) == (state, ctx, [])
+    assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
     state, ctx, _ = handle(state, ctx, Timeout(1, TimeoutName.RESULT))
     assert state == KioskState.IDLE
-    assert handle(state, ctx, UidScan(1, UID)) == (state, ctx, [])
-    state, ctx, effects = handle(state, ctx, UidScan(2, UID))
+    assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
+    state, ctx, effects = handle(state, ctx, CardRead(2, UID, "000000001"))
     assert state == KioskState.ACTIVATING
     assert ActivateUid(2, UID) in effects
 
@@ -152,7 +174,7 @@ def test_duplicates_and_previous_operation_replies_do_not_repeat_registration() 
     state, ctx, _ = start()
     state, ctx, _ = handle(state, ctx, IDENTITY)
     assert handle(state, ctx, IDENTITY) == (state, ctx, [])
-    assert handle(state, ctx, UidScan(1, UID.lower())) == (state, ctx, [])
+    assert handle(state, ctx, CardRead(1, UID.lower(), "000000001")) == (state, ctx, [])
     old_reply = BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)
     state, ctx, _ = handle(state, ctx, old_reply)
     for event in (IDENTITY, old_reply, BackendError(1, BackendOp.ACTIVATE_UID)):
@@ -161,7 +183,7 @@ def test_duplicates_and_previous_operation_replies_do_not_repeat_registration() 
 
 @pytest.mark.parametrize("uid", ["", "123", "GG00", "00 01", "０１", "00\n"])
 def test_invalid_uid_never_reaches_backend(uid: str) -> None:
-    state, ctx, effects = handle(KioskState.IDLE, READY, UidScan(1, uid))
+    state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, uid, "000000001"))
     assert state == KioskState.RESULT
     assert ctx.outcome == Outcome.READ_AGAIN
     assert ctx.uid is ctx.pending_op is None
@@ -180,7 +202,11 @@ def test_invalid_student_number_cannot_register(student: str) -> None:
 
 @pytest.mark.parametrize(
     "event",
-    [IdentityConfirmed(1, "0002ABCD", STUDENT), UidScan(1, "0002ABCD"), BadScan(1, "mixed")],
+    [
+        IdentityConfirmed(1, "0002ABCD", STUDENT),
+        CardRead(1, "0002ABCD", "000000001"),
+        BadScan(1, "mixed"),
+    ],
 )
 def test_conflicting_capture_before_registration_discards_both_identifiers(event: Event) -> None:
     state, ctx, _ = awaiting_identity()
@@ -220,11 +246,11 @@ def test_cancel_a_start_b_then_delayed_a_events_cannot_affect_b() -> None:
     assert state == KioskState.IDLE
     assert ctx.uid is ctx.student_number is ctx.pending_op is None
     assert ctx.session_id == 1
-    assert handle(state, ctx, UidScan(1, UID)) == (state, ctx, [])
-    state, ctx, _ = handle(state, ctx, UidScan(2, "0002ABCD"))
+    assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
+    state, ctx, _ = handle(state, ctx, CardRead(2, "0002ABCD", "000000001"))
     for event in (
         IDENTITY,
-        UidScan(1, UID),
+        CardRead(1, UID, "000000001"),
         BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED),
         BackendError(1, BackendOp.ACTIVATE_UID),
         Timeout(1, TimeoutName.SESSION),
@@ -254,7 +280,7 @@ def test_interrupted_write_holds_until_authoritative_outcome(op: BackendOp, even
     assert ctx.pending_op == op
     assert ctx.uid is ctx.student_number is ctx.outcome is None
     assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
-    assert handle(state, ctx, UidScan(2, UID)) == (state, ctx, [])
+    assert handle(state, ctx, CardRead(2, UID, "000000001")) == (state, ctx, [])
     # Health recovery alone cannot resolve an outstanding write.
     for health in (BackendOnline(), ReaderReady(1)):
         state, ctx, effects = handle(state, ctx, health)
@@ -341,7 +367,7 @@ def test_reader_fault_during_write_survives_backend_resolution() -> None:
     state, ctx, _ = handle(state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED))
     assert state == KioskState.READER_ERROR
     assert ctx.outcome is None
-    assert handle(state, ctx, UidScan(2, UID)) == (state, ctx, [])
+    assert handle(state, ctx, CardRead(2, UID, "000000001")) == (state, ctx, [])
     state, ctx, _ = handle(state, ctx, ReaderReady(1))
     assert state == KioskState.IDLE
 
