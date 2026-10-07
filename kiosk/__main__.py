@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import logging
 
 from kiosk.controller import run
 from kiosk.events import BackendOnline, CardRead, Event, IdentityConfirmed, ReaderReady
@@ -31,7 +32,13 @@ async def main(device: str | None = None) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Makerspace access kiosk.")
     parser.add_argument("--device", help="OMNIKEY input device path, such as /dev/input/event4.")
+    parser.add_argument(
+        "--debug-readers", action="store_true", help="Log reader stages and cancellation timing."
+    )
     args = parser.parse_args()
+    if args.debug_readers:
+        logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s")
+        logging.getLogger("kiosk.readers").setLevel(logging.DEBUG)
     try:
         asyncio.run(main(device=args.device))
     except KeyboardInterrupt:

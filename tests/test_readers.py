@@ -1,11 +1,13 @@
 import asyncio
+import logging
 import sys
 import threading
 from types import SimpleNamespace
 
 import pytest
 
-from kiosk import readers
+from kiosk import controller, readers
+from kiosk.events import BackendOnline, CardRead, KioskState, ReaderReady
 from kiosk.readers import student_numbers
 
 
@@ -61,6 +63,72 @@ def input_device(monkeypatch: pytest.MonkeyPatch):
             return future
 
     return InputDevice
+
+
+def test_controller_first_scan_runs_real_threaded_reader_pipeline(
+    input_device, monkeypatch, caplog
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="kiosk.readers")
+
+    async def check() -> None:
+        device = input_device()
+        queue = asyncio.Queue()
+        finished = asyncio.Event()
+        blocker = asyncio.Event()
+        commands = []
+        scans = []
+        original_handle = controller.handle
+
+        class UidReader:
+            def call_function(self, command, *, params, response_length):
+                commands.append(params)
+                if params == b"\x01\x02":
+                    device.feed("000123456\n")
+                return b""
+
+            def read_passive_target(self, *, timeout):
+                return bytes.fromhex("0001ABCD")
+
+        def observe(state, context, event):
+            if isinstance(event, CardRead):
+                scans.append(event)
+            result = original_handle(state, context, event)
+            if result[0] == KioskState.RESULT:
+                finished.set()
+            return result
+
+        async def timer(queue, effect, seconds):
+            await blocker.wait()
+
+        monkeypatch.setattr(controller, "handle", observe)
+        monkeypatch.setattr(controller, "fire_timeout", timer)
+        queue.put_nowait(BackendOnline())
+        queue.put_nowait(ReaderReady(0))
+        runner = asyncio.create_task(
+            controller.run(queue, hardware_mode=True, uid_reader=UidReader(), student_reader=device)
+        )
+        try:
+            await asyncio.wait_for(finished.wait(), 1)
+            assert scans == [CardRead(1, "0001ABCD", "000123456")]
+            assert commands == [b"\x01\x03", b"\x01\x02"]
+        finally:
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(check())
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages == [
+        "[DEBUG-readers] Draining queued OMNIKEY input",
+        "[DEBUG-readers] OMNIKEY drain finished: 0 events",
+        "[DEBUG-readers] Scheduling UID worker",
+        "[DEBUG-readers] RF-on command starting",
+        "[DEBUG-readers] RF-on acknowledged",
+        "[DEBUG-readers] UID read starting (timeout=5.0s)",
+        "[DEBUG-readers] UID read returned: card found",
+        "[DEBUG-readers] RF-off command starting",
+        "[DEBUG-readers] RF-off acknowledged",
+        "[DEBUG-readers] UID worker finished",
+    ]
 
 
 @pytest.mark.parametrize("prefix", ["", "1234567890\n", "123?56789\n", "12345\n", "12345"])

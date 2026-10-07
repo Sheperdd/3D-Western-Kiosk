@@ -3,10 +3,12 @@ reader, which is a USB smart card reader. The PN532 is used to get the UID of th
 OMNIKEY is used to read the student number from the card."""
 
 import asyncio
+import logging
 from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 
 INTER_KEY_TIMEOUT = 2.0  # Seconds; tune against the physical reader if needed.
+logger = logging.getLogger(__name__)
 
 
 class _StudentNumberParser:
@@ -78,6 +80,7 @@ async def read_student_number_async(device, *, timeout: float = 10.0) -> str | N
 
 
 def set_rf_field(reader, enabled: bool) -> None:
+    logger.debug("[DEBUG-readers] RF-%s command starting", "on" if enabled else "off")
     response = reader.call_function(
         0x32,  # RFConfiguration command
         params=bytes([0x01, 0x03 if enabled else 0x02]),
@@ -85,12 +88,15 @@ def set_rf_field(reader, enabled: bool) -> None:
     )
     if response is None:
         raise RuntimeError("PN532 did not confirm the command")
+    logger.debug("[DEBUG-readers] RF-%s acknowledged", "on" if enabled else "off")
 
 
 def read_uid(reader, timeout: float = 5.0) -> str | None:
     try:
         set_rf_field(reader, True)
+        logger.debug("[DEBUG-readers] UID read starting (timeout=%ss)", timeout)
         uid = reader.read_passive_target(timeout=timeout)
+        logger.debug("[DEBUG-readers] UID read returned: %s", "card found" if uid else "no card")
     finally:
         set_rf_field(reader, False)
 
@@ -106,9 +112,11 @@ async def read_uid_async(reader, timeout: float = 5.0) -> str | None:
         try:
             await asyncio.shield(worker)
         except asyncio.CancelledError as error:
+            logger.debug("[DEBUG-readers] Cancellation requested; waiting for UID worker cleanup")
             cancellation = error
 
     result = worker.result()
+    logger.debug("[DEBUG-readers] UID worker finished")
     if cancellation is not None:
         raise cancellation
     return result
@@ -125,8 +133,15 @@ async def read_card_async(
     Cancellation waits for the PN532 worker through read_uid_async().
     """
     while True:
+        logger.debug("[DEBUG-readers] Draining queued OMNIKEY input")
+        discarded = 0
         while student_reader.read_one() is not None:
+            discarded += 1
+            if discarded % 100 == 0:
+                logger.debug("[DEBUG-readers] Still draining OMNIKEY: %s events", discarded)
             await asyncio.sleep(0)
+        logger.debug("[DEBUG-readers] OMNIKEY drain finished: %s events", discarded)
+        logger.debug("[DEBUG-readers] Scheduling UID worker")
         uid = await read_uid_async(uid_reader)
         if uid is not None:
             break
