@@ -7,6 +7,7 @@ from kiosk.controller import fake_register_and_activate
 from kiosk.events import (
     ActivateUid,
     BackendError,
+    BackendOffline,
     BackendOnline,
     BackendOp,
     BackendResult,
@@ -27,6 +28,186 @@ from kiosk.events import (
     UidScan,
 )
 from kiosk.machine import Context
+
+
+@pytest.mark.parametrize("reader_fails", [False, True], ids=["uid", "reader-fault"])
+def test_hardware_acquisition_waits_for_readiness_and_does_not_rearm(
+    monkeypatch: pytest.MonkeyPatch, reader_fails: bool
+) -> None:
+    async def check() -> None:
+        queue: asyncio.Queue[Event] = asyncio.Queue()
+        observed: asyncio.Queue[tuple[Event, KioskState, Context]] = asyncio.Queue()
+        original_handle = controller.handle
+        reader = object()
+        calls = []
+
+        def observe(state, context, event):
+            result = original_handle(state, context, event)
+            observed.put_nowait((event, result[0], result[1]))
+            return result
+
+        async def read_uid(uid_reader):
+            calls.append(uid_reader)
+            await asyncio.sleep(0)
+            if reader_fails:
+                raise RuntimeError("RF-off failed")
+            return None if len(calls) == 1 else "0001ABCD"
+
+        monkeypatch.setattr(controller, "handle", observe)
+        monkeypatch.setattr(controller, "read_uid_async", read_uid)
+        monkeypatch.setattr(controller, "DEMO_BACKEND_DELAY", 0)
+        monkeypatch.setitem(controller.DEMO_TIMEOUT_SECONDS, TimeoutName.RESULT, 0)
+        runner = asyncio.create_task(controller.run(queue, hardware_mode=True, uid_reader=reader))
+        try:
+            queue.put_nowait(BackendOnline())
+            _, state, _ = await asyncio.wait_for(observed.get(), 1)
+            assert state == KioskState.READER_ERROR
+            assert not calls
+            queue.put_nowait(ReaderReady(0))
+            _, state, _ = await asyncio.wait_for(observed.get(), 1)
+            assert state == KioskState.IDLE
+
+            event, state, context = await asyncio.wait_for(observed.get(), 1)
+            if reader_fails:
+                assert event == ReaderFault(0, "RF-off failed")
+                assert state == KioskState.READER_ERROR
+                assert context.session_id == 0
+                queue.put_nowait(ReaderReady(0))
+            else:
+                assert event == UidScan(1, "0001ABCD")
+                assert state == KioskState.ACTIVATING
+                event, state, context = await asyncio.wait_for(observed.get(), 1)
+                assert event == BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED)
+                assert state == KioskState.RESULT
+                assert context.outcome == Outcome.ACTIVATED
+
+            _, state, _ = await asyncio.wait_for(observed.get(), 1)
+            assert state == KioskState.IDLE
+            queue.put_nowait(BackendOnline())
+            event, _, _ = await asyncio.wait_for(observed.get(), 1)
+            assert event == BackendOnline()
+            await asyncio.sleep(0)
+            assert calls == [reader] * (1 if reader_fails else 2)
+            assert observed.empty()
+        finally:
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+def test_hardware_discards_queued_uid_after_readiness_is_lost_and_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        queue: asyncio.Queue[Event] = asyncio.Queue()
+        observed: asyncio.Queue[Event] = asyncio.Queue()
+        original_handle = controller.handle
+        calls = []
+
+        def observe(state, context, event):
+            observed.put_nowait(event)
+            return original_handle(state, context, event)
+
+        async def read_uid(reader):
+            calls.append(reader)
+            queue.put_nowait(BackendOffline())
+            queue.put_nowait(BackendOnline())
+            return "0001ABCD"
+
+        monkeypatch.setattr(controller, "handle", observe)
+        monkeypatch.setattr(controller, "read_uid_async", read_uid)
+        queue.put_nowait(BackendOnline())
+        queue.put_nowait(ReaderReady(0))
+        reader = object()
+        runner = asyncio.create_task(controller.run(queue, hardware_mode=True, uid_reader=reader))
+        try:
+            for expected in [BackendOnline(), ReaderReady(0), BackendOffline(), BackendOnline()]:
+                assert await asyncio.wait_for(observed.get(), 1) == expected
+            queue.put_nowait(ReaderReady(0))
+            assert await asyncio.wait_for(observed.get(), 1) == ReaderReady(0)
+            assert calls == [reader]
+            assert observed.empty()
+        finally:
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    [None, BackendOffline(), ReaderFault(0, "Reader disconnected")],
+    ids=["shutdown", "backend-offline", "reader-fault"],
+)
+def test_hardware_acquisition_cancellation_drains_cleanup(
+    monkeypatch: pytest.MonkeyPatch, interruption: Event | None
+) -> None:
+    async def check() -> None:
+        queue: asyncio.Queue[Event] = asyncio.Queue()
+        started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        cleanup_finished = asyncio.Event()
+        recovered = asyncio.Event()
+        blocker = asyncio.Event()
+        events = []
+        calls = []
+        original_handle = controller.handle
+
+        def observe(state, context, event):
+            events.append(event)
+            result = original_handle(state, context, event)
+            if cleanup_started.is_set() and result[0] == KioskState.IDLE:
+                recovered.set()
+            return result
+
+        async def read_uid(reader):
+            calls.append(reader)
+            started.set()
+            try:
+                await blocker.wait()
+            finally:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                cleanup_finished.set()
+            return "0001ABCD"
+
+        monkeypatch.setattr(controller, "handle", observe)
+        monkeypatch.setattr(controller, "read_uid_async", read_uid)
+        queue.put_nowait(BackendOnline())
+        queue.put_nowait(ReaderReady(0))
+        reader = object()
+        runner = asyncio.create_task(controller.run(queue, hardware_mode=True, uid_reader=reader))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            if interruption is None:
+                runner.cancel()
+            else:
+                queue.put_nowait(interruption)
+            await asyncio.wait_for(cleanup_started.wait(), 1)
+            if interruption is not None:
+                queue.put_nowait(BackendOnline())
+                queue.put_nowait(ReaderReady(0))
+                await asyncio.wait_for(recovered.wait(), 1)
+                assert calls == [reader]
+                runner.cancel()
+            await asyncio.sleep(0)
+            assert not runner.done()
+            assert not cleanup_finished.is_set()
+            release_cleanup.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(runner, 1)
+            assert cleanup_finished.is_set()
+            assert not any(isinstance(event, UidScan) for event in events)
+            assert queue.empty()
+        finally:
+            release_cleanup.set()
+            if not runner.done() and runner.cancelling() == 0:
+                runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize(

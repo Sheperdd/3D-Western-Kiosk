@@ -20,8 +20,10 @@ from kiosk.events import (
     StopCapture,
     Timeout,
     TimeoutName,
+    UidScan,
 )
 from kiosk.machine import Context, handle
+from kiosk.readers import read_uid_async
 
 
 async def fire_timeout(queue: asyncio.Queue[Event], effect: StartTimeout, seconds: float) -> None:
@@ -156,7 +158,10 @@ def dispatch(
     print(type(effect).__name__)
 
 
-async def run(queue: asyncio.Queue[Event], *, hardware_mode: bool = False) -> None:
+async def run(queue: asyncio.Queue[Event], *, hardware_mode: bool = False, uid_reader=None) -> None:
+    if hardware_mode and uid_reader is None:
+        raise ValueError("uid_reader must be provided in hardware mode")
+
     state = KioskState.OFFLINE
     context = Context()
     timers: dict[
@@ -164,10 +169,35 @@ async def run(queue: asyncio.Queue[Event], *, hardware_mode: bool = False) -> No
     ] = {}  # session_id, timeout_name -> task
     background_tasks: set[asyncio.Task[None]] = set()
     capture_tasks: dict[int, asyncio.Task[None]] = {}  # session_id -> task
+    uid_task: asyncio.Task[None] | None = None
+    acquired_uid: UidScan | None = None
+    uid_admission_revoked = False
+
+    async def acquire_uid() -> None:
+        nonlocal acquired_uid
+        session_id = context.session_id
+        try:
+            while state == KioskState.IDLE and context.reader_ready:
+                uid = await read_uid_async(uid_reader)
+                if (
+                    state != KioskState.IDLE
+                    or not context.reader_ready
+                    or context.session_id != session_id
+                ):
+                    return
+                if uid is not None:
+                    acquired_uid = UidScan(session_id + 1, uid)
+                    queue.put_nowait(acquired_uid)
+                    return
+        except Exception as error:
+            logging.exception("UID acquisition failed")
+            queue.put_nowait(ReaderFault(context.session_id, str(error)))
 
     try:
         while True:
             event = await queue.get()
+            if event is acquired_uid and uid_admission_revoked:
+                continue
             print("Processing event:", type(event).__name__)
             state, context, effects = handle(state, context, event)
             print("State: ", state.name, "Outcome: ", context.outcome)
@@ -180,6 +210,16 @@ async def run(queue: asyncio.Queue[Event], *, hardware_mode: bool = False) -> No
                     capture_tasks,
                     hardware_mode=hardware_mode,
                 )
+            if hardware_mode:
+                if state == KioskState.IDLE and context.reader_ready:
+                    if uid_task is None:
+                        uid_task = asyncio.create_task(acquire_uid())
+                        background_tasks.add(uid_task)
+                        uid_task.add_done_callback(background_tasks.discard)
+                elif uid_task is not None:
+                    uid_admission_revoked = True
+                    if not uid_task.done() and uid_task.cancelling() == 0:
+                        uid_task.cancel()
     finally:
         background_snapshot = list(background_tasks)
         for task in background_snapshot:

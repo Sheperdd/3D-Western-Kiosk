@@ -17,14 +17,17 @@ async def main(device: str | None = None) -> None:
     else:
         from kiosk.readers import open_readers
 
-        with open_readers(device):
+        with open_readers(device) as (uid_reader, _student_reader):
             queue.put_nowait(BackendOnline())
             queue.put_nowait(ReaderReady(0))
-            await run(queue, hardware_mode=True)
+            await run(queue, hardware_mode=True, uid_reader=uid_reader)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Makerspace access kiosk.")
     parser.add_argument("--device", help="OMNIKEY input device path, such as /dev/input/event4.")
     args = parser.parse_args()
-    asyncio.run(main(device=args.device))
+    try:
+        asyncio.run(main(device=args.device))
+    except KeyboardInterrupt:
+        print("\nStopped.")

@@ -2,6 +2,7 @@
 reader, which is a USB smart card reader. The PN532 is used to get the UID of the card, and the
 OMNIKEY is used to read the student number from the card."""
 
+import asyncio
 from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 
@@ -58,6 +59,21 @@ def read_uid(reader, timeout: float = 5.0) -> str | None:
     if uid is None:
         return None
     return uid.hex().upper()
+
+
+async def read_uid_async(reader, timeout: float = 5.0) -> str | None:
+    worker = asyncio.create_task(asyncio.to_thread(read_uid, reader, timeout=timeout))
+    cancellation: asyncio.CancelledError | None = None
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as error:
+            cancellation = error
+
+    result = worker.result()
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 @contextmanager
