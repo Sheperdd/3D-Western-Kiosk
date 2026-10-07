@@ -23,7 +23,7 @@ from kiosk.events import (
     UidScan,
 )
 from kiosk.machine import Context, handle
-from kiosk.readers import read_uid_async
+from kiosk.readers import read_student_number_async, read_uid_async
 
 
 async def fire_timeout(queue: asyncio.Queue[Event], effect: StartTimeout, seconds: float) -> None:
@@ -92,6 +92,20 @@ async def fake_capture_identity(
         )
 
 
+async def capture_student_number(
+    queue: asyncio.Queue[Event], effect: CaptureIdentity, student_reader
+) -> None:
+    try:
+        number = await read_student_number_async(
+            student_reader, timeout=DEMO_TIMEOUT_SECONDS[TimeoutName.SESSION]
+        )
+        if number is not None:
+            print(f"Student number received (unverified): {number}")
+    except Exception as error:
+        logging.exception("Student-number capture failed")
+        queue.put_nowait(ReaderFault(effect.session_id, f"Student-number capture failed: {error}"))
+
+
 # Laptop demo settings; production durations still need agreement.
 DEMO_TIMEOUT_SECONDS: dict[TimeoutName, float] = {
     TimeoutName.SESSION: 10.0,
@@ -108,6 +122,7 @@ def dispatch(
     capture_tasks: dict[int, asyncio.Task[None]],
     *,
     hardware_mode: bool = False,
+    student_reader=None,
 ) -> None:
     if isinstance(effect, StartTimeout):
         if (effect.session_id, effect.name) in timers:
@@ -140,15 +155,19 @@ def dispatch(
         backend_task.add_done_callback(background_tasks.discard)
 
     elif isinstance(effect, CaptureIdentity):
-        if not hardware_mode:
+        if hardware_mode:
+            capture_task = asyncio.create_task(
+                capture_student_number(queue, effect, student_reader)
+            )
+        else:
             capture_task = asyncio.create_task(
                 fake_capture_identity(
                     queue, effect, DEMO_BACKEND_DELAY, student_number="1234567890"
                 )
             )
-            background_tasks.add(capture_task)
-            capture_task.add_done_callback(background_tasks.discard)
-            capture_tasks[effect.session_id] = capture_task
+        background_tasks.add(capture_task)
+        capture_task.add_done_callback(background_tasks.discard)
+        capture_tasks[effect.session_id] = capture_task
 
     elif isinstance(effect, StopCapture):
         if effect.session_id in capture_tasks:
@@ -158,9 +177,15 @@ def dispatch(
     print(type(effect).__name__)
 
 
-async def run(queue: asyncio.Queue[Event], *, hardware_mode: bool = False, uid_reader=None) -> None:
-    if hardware_mode and uid_reader is None:
-        raise ValueError("uid_reader must be provided in hardware mode")
+async def run(
+    queue: asyncio.Queue[Event],
+    *,
+    hardware_mode: bool = False,
+    uid_reader=None,
+    student_reader=None,
+) -> None:
+    if hardware_mode and (uid_reader is None or student_reader is None):
+        raise ValueError("Hardware mode requires both uid_reader and student_reader")
 
     state = KioskState.OFFLINE
     context = Context()
@@ -186,6 +211,7 @@ async def run(queue: asyncio.Queue[Event], *, hardware_mode: bool = False, uid_r
                 ):
                     return
                 if uid is not None:
+                    print(f"UID received: {uid}")
                     acquired_uid = UidScan(session_id + 1, uid)
                     queue.put_nowait(acquired_uid)
                     return
@@ -209,6 +235,7 @@ async def run(queue: asyncio.Queue[Event], *, hardware_mode: bool = False, uid_r
                     background_tasks,
                     capture_tasks,
                     hardware_mode=hardware_mode,
+                    student_reader=student_reader,
                 )
             if hardware_mode:
                 if state == KioskState.IDLE and context.reader_ready:

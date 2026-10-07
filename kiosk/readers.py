@@ -9,34 +9,72 @@ from contextlib import closing, contextmanager
 INTER_KEY_TIMEOUT = 2.0  # Seconds; tune against the physical reader if needed.
 
 
-def student_numbers(events: Iterable[tuple[float, str]]) -> Iterator[str]:
-    buffer = ""
-    previous = 0.0
-    for timestamp, character in events:
-        if timestamp - previous > INTER_KEY_TIMEOUT:
-            buffer = ""
-        previous = timestamp
+class _StudentNumberParser:
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.previous = 0.0
+
+    def feed(self, timestamp: float, character: str) -> str | None:
+        if timestamp - self.previous > INTER_KEY_TIMEOUT:
+            self.buffer = ""
+        self.previous = timestamp
         if character == "\n":
+            buffer = self.buffer
+            self.buffer = ""
             if len(buffer) == 9 and buffer.isascii() and buffer.isdigit():
-                yield buffer
-            buffer = ""
+                return buffer
         else:
-            # Ten characters keep an overlong scan invalid without unbounded storage.
-            buffer = (buffer + character)[:10]
+            self.buffer = (self.buffer + character)[:10]
+        return None
+
+
+def student_numbers(events: Iterable[tuple[float, str]]) -> Iterator[str]:
+    parser = _StudentNumberParser()
+    for timestamp, character in events:
+        number = parser.feed(timestamp, character)
+        if number is not None:
+            yield number
+
+
+def _character(event) -> str | None:
+    from evdev import ecodes
+
+    if event.type != ecodes.EV_KEY or event.value != 1:
+        return None
+    if event.code == ecodes.KEY_ENTER:
+        return "\n"
+    digits = {getattr(ecodes, f"KEY_{digit}"): str(digit) for digit in range(10)}
+    return digits.get(event.code, "?")
 
 
 def read_characters(device) -> Iterator[tuple[float, str]]:
-    from evdev import ecodes
-
-    digits = {getattr(ecodes, f"KEY_{i}"): str(i) for i in range(10)}
     for event in device.read_loop():
-        if event.type != ecodes.EV_KEY or event.value != 1:
-            continue  # Ignore releases, held-key repeats, and non-key events.
-        if event.code == ecodes.KEY_ENTER:  # noqa: SIM108 - Keep the translation steps explicit.
-            character = "\n"
-        else:
-            character = digits.get(event.code, "?")
-        yield event.timestamp(), character
+        character = _character(event)
+        if character is not None:
+            yield event.timestamp(), character
+
+
+async def read_student_number_async(device, *, timeout: float = 10.0) -> str | None:
+    """Read an unverified number; the caller owns device access and input freshness."""
+    parser = _StudentNumberParser()
+    deadline = asyncio.timeout(timeout)
+    loop = asyncio.get_running_loop()
+    events = device.async_read_loop()
+    try:
+        async with deadline:
+            while True:
+                event = await asyncio.shield(anext(events))
+                character = _character(event)
+                if character is not None:
+                    number = parser.feed(event.timestamp(), character)
+                    if number is not None:
+                        return number
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        return None
+    finally:
+        loop.remove_reader(device.fileno())
 
 
 def set_rf_field(reader, enabled: bool) -> None:

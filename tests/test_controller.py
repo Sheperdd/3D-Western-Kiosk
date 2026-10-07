@@ -30,9 +30,139 @@ from kiosk.events import (
 from kiosk.machine import Context
 
 
+@pytest.mark.parametrize(
+    "uid_reader,student_reader", [(None, None), (object(), None), (None, object())]
+)
+def test_hardware_requires_both_readers(uid_reader, student_reader) -> None:
+    async def check() -> None:
+        with pytest.raises(ValueError, match="requires both uid_reader and student_reader"):
+            await asyncio.wait_for(
+                controller.run(
+                    asyncio.Queue(),
+                    hardware_mode=True,
+                    uid_reader=uid_reader,
+                    student_reader=student_reader,
+                ),
+                1,
+            )
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("result", ["000123456", None, OSError("Reader disconnected")])
+def test_hardware_capture_is_diagnostic_only(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], result
+) -> None:
+    async def check() -> None:
+        queue: asyncio.Queue[Event] = asyncio.Queue()
+        tasks: set[asyncio.Task[None]] = set()
+        captures: dict[int, asyncio.Task[None]] = {}
+        reader = object()
+        calls = []
+
+        async def read_student_number(student_reader, *, timeout):
+            calls.append((student_reader, timeout))
+            if isinstance(result, OSError):
+                raise result
+            return result
+
+        monkeypatch.setattr(controller, "read_student_number_async", read_student_number)
+        monkeypatch.setitem(controller.DEMO_TIMEOUT_SECONDS, TimeoutName.SESSION, 13.0)
+        controller.dispatch(
+            queue,
+            CaptureIdentity(7, "0001ABCD"),
+            {},
+            tasks,
+            captures,
+            hardware_mode=True,
+            student_reader=reader,
+        )
+        task = captures[7]
+        assert tasks == {task}
+        await asyncio.wait_for(task, 1)
+        assert not tasks
+        assert calls == [(reader, 13.0)]
+        if isinstance(result, OSError):
+            assert queue.get_nowait() == ReaderFault(
+                7, "Student-number capture failed: Reader disconnected"
+            )
+        assert queue.empty()
+        controller.dispatch(queue, StopCapture(7), {}, tasks, captures)
+        assert not captures
+
+    asyncio.run(check())
+    output = capsys.readouterr().out
+    if isinstance(result, str):
+        assert f"Student number received (unverified): {result}" in output
+    else:
+        assert "Student number received" not in output
+
+
+def test_unregistered_hardware_session_expires_without_confirming_raw_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def check() -> None:
+        queue: asyncio.Queue[Event] = asyncio.Queue()
+        observed: asyncio.Queue[tuple[KioskState, Context]] = asyncio.Queue()
+        events = []
+        number_received = asyncio.Event()
+        timer_blocker = asyncio.Event()
+        original_handle = controller.handle
+        original_activate = controller.fake_activate_uid
+
+        def observe(state, context, event):
+            events.append(event)
+            result = original_handle(state, context, event)
+            observed.put_nowait((result[0], result[1]))
+            return result
+
+        async def read_uid(uid_reader):
+            return "0001ABCD"
+
+        async def read_student_number(student_reader, *, timeout):
+            number_received.set()
+            return "000123456"
+
+        async def activate(queue, effect, seconds, desired_outcome):
+            await number_received.wait()
+            await original_activate(queue, effect, 0, Outcome.UNREGISTERED)
+
+        async def timer(queue, effect, seconds):
+            await timer_blocker.wait()
+
+        async def reach(target):
+            while True:
+                state, context = await observed.get()
+                if state == target:
+                    return context
+
+        monkeypatch.setattr(controller, "handle", observe)
+        monkeypatch.setattr(controller, "read_uid_async", read_uid)
+        monkeypatch.setattr(controller, "read_student_number_async", read_student_number)
+        monkeypatch.setattr(controller, "fake_activate_uid", activate)
+        monkeypatch.setattr(controller, "fire_timeout", timer)
+        queue.put_nowait(BackendOnline())
+        queue.put_nowait(ReaderReady(0))
+        runner = asyncio.create_task(
+            controller.run(queue, hardware_mode=True, uid_reader=object(), student_reader=object())
+        )
+        try:
+            context = await asyncio.wait_for(reach(KioskState.AWAITING_IDENTITY), 1)
+            assert context.student_number is None
+            queue.put_nowait(Timeout(1, TimeoutName.SESSION))
+            context = await asyncio.wait_for(reach(KioskState.RESULT), 1)
+            assert context.outcome == Outcome.SESSION_EXPIRED
+            assert not any(isinstance(event, IdentityConfirmed) for event in events)
+        finally:
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize("reader_fails", [False, True], ids=["uid", "reader-fault"])
 def test_hardware_acquisition_waits_for_readiness_and_does_not_rearm(
-    monkeypatch: pytest.MonkeyPatch, reader_fails: bool
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], reader_fails: bool
 ) -> None:
     async def check() -> None:
         queue: asyncio.Queue[Event] = asyncio.Queue()
@@ -53,11 +183,17 @@ def test_hardware_acquisition_waits_for_readiness_and_does_not_rearm(
                 raise RuntimeError("RF-off failed")
             return None if len(calls) == 1 else "0001ABCD"
 
+        async def read_student_number(student_reader, *, timeout):
+            return None
+
         monkeypatch.setattr(controller, "handle", observe)
         monkeypatch.setattr(controller, "read_uid_async", read_uid)
+        monkeypatch.setattr(controller, "read_student_number_async", read_student_number)
         monkeypatch.setattr(controller, "DEMO_BACKEND_DELAY", 0)
         monkeypatch.setitem(controller.DEMO_TIMEOUT_SECONDS, TimeoutName.RESULT, 0)
-        runner = asyncio.create_task(controller.run(queue, hardware_mode=True, uid_reader=reader))
+        runner = asyncio.create_task(
+            controller.run(queue, hardware_mode=True, uid_reader=reader, student_reader=object())
+        )
         try:
             queue.put_nowait(BackendOnline())
             _, state, _ = await asyncio.wait_for(observed.get(), 1)
@@ -94,6 +230,8 @@ def test_hardware_acquisition_waits_for_readiness_and_does_not_rearm(
             await asyncio.gather(runner, return_exceptions=True)
 
     asyncio.run(check())
+    output = capsys.readouterr().out
+    assert output.count("UID received: 0001ABCD") == (0 if reader_fails else 1)
 
 
 def test_hardware_discards_queued_uid_after_readiness_is_lost_and_restored(
@@ -120,7 +258,9 @@ def test_hardware_discards_queued_uid_after_readiness_is_lost_and_restored(
         queue.put_nowait(BackendOnline())
         queue.put_nowait(ReaderReady(0))
         reader = object()
-        runner = asyncio.create_task(controller.run(queue, hardware_mode=True, uid_reader=reader))
+        runner = asyncio.create_task(
+            controller.run(queue, hardware_mode=True, uid_reader=reader, student_reader=object())
+        )
         try:
             for expected in [BackendOnline(), ReaderReady(0), BackendOffline(), BackendOnline()]:
                 assert await asyncio.wait_for(observed.get(), 1) == expected
@@ -178,7 +318,9 @@ def test_hardware_acquisition_cancellation_drains_cleanup(
         queue.put_nowait(BackendOnline())
         queue.put_nowait(ReaderReady(0))
         reader = object()
-        runner = asyncio.create_task(controller.run(queue, hardware_mode=True, uid_reader=reader))
+        runner = asyncio.create_task(
+            controller.run(queue, hardware_mode=True, uid_reader=reader, student_reader=object())
+        )
         try:
             await asyncio.wait_for(started.wait(), 1)
             if interruption is None:
@@ -379,8 +521,9 @@ def test_capture_exception_emits_reader_fault(
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("hardware_mode", [False, True])
 def test_stop_capture_cancels_only_matching_capture_and_tracks_cleanup(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, hardware_mode: bool
 ) -> None:
     async def check() -> None:
         queue: asyncio.Queue[Event] = asyncio.Queue()
@@ -410,11 +553,24 @@ def test_stop_capture_cancels_only_matching_capture_and_tracks_cleanup(
                 BackendResult(effect.session_id, BackendOp.ACTIVATE_UID, desired_outcome)
             )
 
+        async def read_student_number(student_reader, *, timeout):
+            await controlled_delay(timeout)
+            return "000000001"
+
         # Gate the real capture coroutine's delay so cancellation exercises its exception handling.
         monkeypatch.setattr(controller.asyncio, "sleep", controlled_delay)
         monkeypatch.setattr(controller, "fake_activate_uid", activate)
-        controller.dispatch(queue, CaptureIdentity(7, "0001ABCD"), {}, tasks, captures)
-        controller.dispatch(queue, CaptureIdentity(8, "0002ABCD"), {}, tasks, captures)
+        monkeypatch.setattr(controller, "read_student_number_async", read_student_number)
+        for effect in [CaptureIdentity(7, "0001ABCD"), CaptureIdentity(8, "0002ABCD")]:
+            controller.dispatch(
+                queue,
+                effect,
+                {},
+                tasks,
+                captures,
+                hardware_mode=hardware_mode,
+                student_reader=object(),
+            )
         controller.dispatch(queue, ActivateUid(7, "0001ABCD"), {}, tasks, captures)
         scheduled = list(tasks)
         stopped = captures[7]
@@ -436,10 +592,12 @@ def test_stop_capture_cancels_only_matching_capture_and_tracks_cleanup(
             await asyncio.wait_for(asyncio.gather(*scheduled, return_exceptions=True), 1)
             assert stopped.cancelled()
             assert not tasks
-            assert {queue.get_nowait(), queue.get_nowait()} == {
-                IdentityConfirmed(8, "0002ABCD", "1234567890"),
+            expected: set[Event] = {
                 BackendResult(7, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED),
             }
+            if not hardware_mode:
+                expected.add(IdentityConfirmed(8, "0002ABCD", "1234567890"))
+            assert {queue.get_nowait() for _ in expected} == expected
             assert queue.empty()  # No identity or ReaderFault for the cancelled capture.
         finally:
             release_cleanup.set()
@@ -662,8 +820,9 @@ def test_controller_flow(
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("hardware_mode", [False, True])
 def test_shutdown_cancels_and_awaits_timer_backend_and_capture(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, hardware_mode: bool
 ) -> None:
     async def check() -> None:
         queue: asyncio.Queue[Event] = asyncio.Queue()
@@ -694,13 +853,21 @@ def test_shutdown_cancels_and_awaits_timer_backend_and_capture(
         async def capture(queue, effect, seconds, student_number):
             await wait_until_cancelled()
 
+        async def read_student_number(student_reader, *, timeout):
+            await wait_until_cancelled()
+
         monkeypatch.setattr(controller, "fire_timeout", timer)
         monkeypatch.setattr(controller, "fake_activate_uid", activate)
         monkeypatch.setattr(controller, "fake_capture_identity", capture)
+        monkeypatch.setattr(controller, "read_student_number_async", read_student_number)
         for event in [BackendOnline(), ReaderReady(0), UidScan(1, "0001ABCD")]:
             queue.put_nowait(event)
 
-        runner = asyncio.create_task(controller.run(queue))
+        runner = asyncio.create_task(
+            controller.run(
+                queue, hardware_mode=hardware_mode, uid_reader=object(), student_reader=object()
+            )
+        )
         try:
             await asyncio.wait_for(all_started.wait(), timeout=1)
             runner.cancel()
@@ -738,7 +905,14 @@ def test_shutdown_awaits_removed_timer_cleanup(
         old_task: asyncio.Task[None] | None = None
 
         def capture_dispatch(
-            queue, effect, timers, background_tasks, capture_tasks, *, hardware_mode: bool = False
+            queue,
+            effect,
+            timers,
+            background_tasks,
+            capture_tasks,
+            *,
+            hardware_mode: bool = False,
+            student_reader=None,
         ):
             nonlocal captured_timers, captured_tasks, captured_captures
             captured_timers = timers
@@ -751,6 +925,7 @@ def test_shutdown_awaits_removed_timer_cleanup(
                 background_tasks,
                 capture_tasks,
                 hardware_mode=hardware_mode,
+                student_reader=student_reader,
             )
 
         async def timer(queue, effect, seconds):

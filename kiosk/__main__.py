@@ -17,10 +17,15 @@ async def main(device: str | None = None) -> None:
     else:
         from kiosk.readers import open_readers
 
-        with open_readers(device) as (uid_reader, _student_reader):
+        with open_readers(device) as (uid_reader, student_reader):
             queue.put_nowait(BackendOnline())
             queue.put_nowait(ReaderReady(0))
-            await run(queue, hardware_mode=True, uid_reader=uid_reader)
+            await run(
+                queue,
+                hardware_mode=True,
+                uid_reader=uid_reader,
+                student_reader=student_reader,
+            )
 
 
 if __name__ == "__main__":
