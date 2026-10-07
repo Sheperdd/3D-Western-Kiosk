@@ -111,7 +111,7 @@ DEMO_TIMEOUT_SECONDS: dict[TimeoutName, float] = {
     TimeoutName.SESSION: 10.0,
     TimeoutName.RESULT: 2.0,
 }
-DEMO_BACKEND_DELAY = 0.1
+DEMO_BACKEND_DELAY = 0.001
 
 
 def dispatch(
