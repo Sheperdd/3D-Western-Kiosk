@@ -104,6 +104,8 @@ def dispatch(
     timers: dict[tuple[int, TimeoutName], asyncio.Task[None]],
     background_tasks: set[asyncio.Task[None]],
     capture_tasks: dict[int, asyncio.Task[None]],
+    *,
+    hardware_mode: bool = False,
 ) -> None:
     if isinstance(effect, StartTimeout):
         if (effect.session_id, effect.name) in timers:
@@ -119,8 +121,9 @@ def dispatch(
             del timers[(effect.session_id, effect.name)]
 
     elif isinstance(effect, ActivateUid):
+        outcome = Outcome.ACTIVATED if hardware_mode else Outcome.UNREGISTERED
         backend_task = asyncio.create_task(
-            fake_activate_uid(queue, effect, DEMO_BACKEND_DELAY, Outcome.UNREGISTERED)
+            fake_activate_uid(queue, effect, DEMO_BACKEND_DELAY, outcome)
         )
         background_tasks.add(backend_task)
         backend_task.add_done_callback(background_tasks.discard)
@@ -135,12 +138,15 @@ def dispatch(
         backend_task.add_done_callback(background_tasks.discard)
 
     elif isinstance(effect, CaptureIdentity):
-        capture_task = asyncio.create_task(
-            fake_capture_identity(queue, effect, DEMO_BACKEND_DELAY, student_number="1234567890")
-        )
-        background_tasks.add(capture_task)
-        capture_task.add_done_callback(background_tasks.discard)
-        capture_tasks[effect.session_id] = capture_task
+        if not hardware_mode:
+            capture_task = asyncio.create_task(
+                fake_capture_identity(
+                    queue, effect, DEMO_BACKEND_DELAY, student_number="1234567890"
+                )
+            )
+            background_tasks.add(capture_task)
+            capture_task.add_done_callback(background_tasks.discard)
+            capture_tasks[effect.session_id] = capture_task
 
     elif isinstance(effect, StopCapture):
         if effect.session_id in capture_tasks:
@@ -150,7 +156,7 @@ def dispatch(
     print(type(effect).__name__)
 
 
-async def run(queue: asyncio.Queue[Event]) -> None:
+async def run(queue: asyncio.Queue[Event], *, hardware_mode: bool = False) -> None:
     state = KioskState.OFFLINE
     context = Context()
     timers: dict[
@@ -166,7 +172,14 @@ async def run(queue: asyncio.Queue[Event]) -> None:
             state, context, effects = handle(state, context, event)
             print("State: ", state.name, "Outcome: ", context.outcome)
             for effect in effects:
-                dispatch(queue, effect, timers, background_tasks, capture_tasks)
+                dispatch(
+                    queue,
+                    effect,
+                    timers,
+                    background_tasks,
+                    capture_tasks,
+                    hardware_mode=hardware_mode,
+                )
     finally:
         background_snapshot = list(background_tasks)
         for task in background_snapshot:

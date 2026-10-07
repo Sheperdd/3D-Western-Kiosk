@@ -556,12 +556,21 @@ def test_shutdown_awaits_removed_timer_cleanup(
         captured_captures: dict[int, asyncio.Task[None]] = {}
         old_task: asyncio.Task[None] | None = None
 
-        def capture_dispatch(queue, effect, timers, background_tasks, capture_tasks):
+        def capture_dispatch(
+            queue, effect, timers, background_tasks, capture_tasks, *, hardware_mode: bool = False
+        ):
             nonlocal captured_timers, captured_tasks, captured_captures
             captured_timers = timers
             captured_tasks = background_tasks
             captured_captures = capture_tasks
-            original_dispatch(queue, effect, timers, background_tasks, capture_tasks)
+            original_dispatch(
+                queue,
+                effect,
+                timers,
+                background_tasks,
+                capture_tasks,
+                hardware_mode=hardware_mode,
+            )
 
         async def timer(queue, effect, seconds):
             nonlocal old_task
