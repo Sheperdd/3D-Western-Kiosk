@@ -141,10 +141,10 @@ async def run(
         tuple[int, TimeoutName], asyncio.Task[None]
     ] = {}  # session_id, timeout_name -> task
     background_tasks: set[asyncio.Task[None]] = set()
-    # ponytail: one presentation per run; add rearming only with validated card removal.
     acquisition_task: asyncio.Task[None] | None = None
-    acquired_scan: CardRead | BadScan | None = None
+    acquired_scan: CardRead | BadScan | ReaderFault | None = None
     admission_revoked = False
+    next_event: asyncio.Task[Event] | None = None
 
     async def acquire_card() -> None:
         nonlocal acquired_scan
@@ -162,9 +162,7 @@ async def run(
             ):
                 return
             if pair is None:
-                reason = (
-                    "Incomplete scan: student number missing. Restart and present the card again."
-                )
+                reason = "Incomplete scan: student number missing. Remove the card and try again."
                 print(reason)
                 acquired_scan = BadScan(session_id, reason)
             else:
@@ -172,45 +170,73 @@ async def run(
             queue.put_nowait(acquired_scan)
         except Exception as error:
             logging.exception("Card acquisition failed")
-            queue.put_nowait(ReaderFault(context.session_id, str(error)))
+            acquired_scan = ReaderFault(context.session_id, str(error))
+            queue.put_nowait(acquired_scan)
 
     try:
         while True:
-            event = await queue.get()
-            if event is acquired_scan and admission_revoked:
-                continue
-            if (
-                acquisition_task is not None
-                and isinstance(event, CancelSession)
-                and event.session_id == context.session_id
-            ):
-                admission_revoked = True
-            print("Processing event:", type(event).__name__)
-            state, context, effects = handle(state, context, event)
-            print("State: ", state.name, "Outcome: ", context.outcome)
-            for effect in effects:
-                dispatch(
-                    queue,
-                    effect,
-                    timers,
-                    background_tasks,
-                    hardware_mode=hardware_mode,
-                )
+            if next_event is None:
+                next_event = asyncio.create_task(queue.get())
+            # Reader cleanup may finish after the last health event; wake for either.
+            await asyncio.wait(
+                [next_event] if acquisition_task is None else [next_event, acquisition_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if next_event.done():
+                event = next_event.result()
+                next_event = None
+                rejected_scan = False
+                if event is acquired_scan:
+                    acquired_scan = None
+                    rejected_scan = admission_revoked and isinstance(event, (CardRead, BadScan))
+                if not rejected_scan:
+                    if (
+                        (acquisition_task is not None or acquired_scan is not None)
+                        and isinstance(event, CancelSession)
+                        and event.session_id == context.session_id
+                    ):
+                        admission_revoked = True
+                    print("Processing event:", type(event).__name__)
+                    state, context, effects = handle(state, context, event)
+                    print("State: ", state.name, "Outcome: ", context.outcome)
+                    for effect in effects:
+                        dispatch(
+                            queue,
+                            effect,
+                            timers,
+                            background_tasks,
+                            hardware_mode=hardware_mode,
+                        )
             if hardware_mode:
-                if state == KioskState.IDLE and context.reader_ready and not admission_revoked:
-                    if acquisition_task is None:
-                        acquisition_task = asyncio.create_task(acquire_card())
-                        background_tasks.add(acquisition_task)
-                        acquisition_task.add_done_callback(background_tasks.discard)
-                elif acquisition_task is not None:
+                ready = (
+                    state == KioskState.IDLE
+                    and context.reader_ready
+                    and context.backend_online
+                    and context.pending_op is None
+                )
+                if not ready:
                     admission_revoked = True
-                    if not acquisition_task.done() and acquisition_task.cancelling() == 0:
+                if acquisition_task is not None:
+                    if acquisition_task.done():
+                        acquisition_task = None
+                    elif admission_revoked and acquisition_task.cancelling() == 0:
                         acquisition_task.cancel()
+                if ready and acquisition_task is None and acquired_scan is None and queue.empty():
+                    # ponytail: assume card removal during result feedback; add detection if needed.
+                    admission_revoked = False
+                    print("Ready for next card.")
+                    acquisition_task = asyncio.create_task(acquire_card())
+                    background_tasks.add(acquisition_task)
+                    acquisition_task.add_done_callback(background_tasks.discard)
     finally:
         admission_revoked = True
         background_snapshot = list(background_tasks)
+        if next_event is not None:
+            next_event.cancel()
         for task in background_snapshot:
             if not task.done() and task.cancelling() == 0:
                 task.cancel()
 
         await asyncio.gather(*background_snapshot, return_exceptions=True)
+        if next_event is not None:
+            await asyncio.gather(next_event, return_exceptions=True)

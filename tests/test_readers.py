@@ -154,6 +154,31 @@ def test_card_read_propagates_reader_failures_without_a_pair(input_device, failu
     asyncio.run(check())
 
 
+def test_next_card_discards_previous_duplicate_and_partial_input(input_device, monkeypatch) -> None:
+    async def check() -> None:
+        device = input_device()
+        scans = iter(
+            [
+                ("0001ABCD", "000000001\n000000001\n000"),
+                ("0002ABCD", "000000002\n"),
+            ]
+        )
+
+        async def read_uid(reader):
+            assert not device.events  # Drain belongs before the new UID/RF sequence.
+            uid, characters = next(scans)
+            device.feed(characters)
+            return uid
+
+        monkeypatch.setattr(readers, "read_uid_async", read_uid)
+        assert await readers.read_card_async(object(), device) == ("0001ABCD", "000000001")
+        assert device.events  # The previous card left a duplicate and partial scan buffered.
+        assert await readers.read_card_async(object(), device) == ("0002ABCD", "000000002")
+        assert not device.events
+
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize("cancel", [False, True], ids=["timeout", "cancel"])
 @pytest.mark.parametrize("partial", ["", "000", "000123456"])
 def test_async_student_number_discards_partial_input_and_detaches_reader(

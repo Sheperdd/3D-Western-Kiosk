@@ -106,7 +106,16 @@ Keep a small record of reader models, SPI wiring/switches, software versions, ca
 
 Use the current combined Pi diagnostic as the starting point, separate from the student-card state machine. It reads PN532 UID bytes through SPI and OMNIKEY characters through Linux input events, following the RF handover above. Keep repeated scans visible during diagnosis. Preserve any newer Pi changes before updating the diagnostic.
 
-The integrated diagnostic now runs with `python -m kiosk --device /dev/input/eventX`. It discards queued OMNIKEY input before the UID attempt, preserves input arriving during RF-off, and emits `CardRead` only after UID/RF acknowledgement and a complete student number. Missing the number produces retry feedback and no backend call. The backend remains simulated, and automatic rearming is disabled; restart for each presentation. Test this path independently of the probe, whose post-handover drain and repeat delay are experimental.
+The integrated diagnostic runs with `python -u -m kiosk --device /dev/input/eventX`. It discards queued OMNIKEY input before each UID attempt, preserves input arriving during RF-off, and emits `CardRead` only after UID/RF acknowledgement and a complete student number. Missing the number produces retry feedback and no backend call. The backend remains simulated. After feedback expires, acquisition rearms automatically once reader cleanup finishes and the controller is ready. Card removal is assumed, as requested; there is no presence detector or guarantee against repeated processing of a held card. Test this path independently of the probe, whose post-handover drain and repeat delay are experimental.
+
+For the repeated-scan Pi trial:
+
+1. Present card A, hold it through the student-number beep, verify both prints, then take it back.
+2. Wait for the result to return to `IDLE` and print `Ready for next card.` (normally about 2 seconds after the result).
+3. Present card A again without restarting. Expect one new completed pair and one simulated activation.
+4. Take A back, wait for readiness, then present card B. Verify B's printed student number and UID; neither value may be carried over from A.
+5. If a scan misses the student number, wait for incomplete-scan feedback and readiness, then retry without restarting. The incomplete attempt must not print `ActivateUid`.
+6. Repeat several alternating-card cycles, then Ctrl+C while waiting for a card to check shutdown. Record any stale values, unexpected errors, or failure to rearm. Do not treat a held-card repeat as a removal-detection failure; removal is outside this version's behavior.
 
 Before production integration, establish same-card assurance, fresh-presentation detection, and recovery from RF command failure. `IdentityConfirmed` must represent verified same-card evidence, not two values grouped by timing or session ID. Raw `CardRead` values never establish a trusted association. Cancellation must finish reader cleanup before devices close; device/command failures must produce `ReaderFault`.
 
