@@ -110,6 +110,8 @@ The integrated diagnostic runs with `python -u -m kiosk --device /dev/input/even
 
 For the repeated-scan Pi trial:
 
+**2026-10-07 observation:** an integrated run repeatedly returned no UID after five-second waits while RF-on/off commands were acknowledged. OMNIKEY input events were buffered during some attempts. Shutdown waited for the active UID read and completed cleanly. Shane subsequently reported that the original reader arrangement worked again; interaction between the readers is suspected but not confirmed. No reader/RF behavior was changed to resolve this incident. The temporary reader trace was removed after this investigation; reliability remains unproven.
+
 1. Present card A, hold it through the student-number beep, verify both prints, then take it back.
 2. Wait for the result to return to `IDLE` and print `Ready for next card.` (normally about 2 seconds after the result).
 3. Present card A again without restarting. Expect one new completed pair and one simulated activation.

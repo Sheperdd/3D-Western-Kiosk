@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import sys
 import threading
 from types import SimpleNamespace
@@ -66,10 +65,8 @@ def input_device(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_controller_first_scan_runs_real_threaded_reader_pipeline(
-    input_device, monkeypatch, caplog
+    input_device, monkeypatch
 ) -> None:
-    caplog.set_level(logging.DEBUG, logger="kiosk.readers")
-
     async def check() -> None:
         device = input_device()
         queue = asyncio.Queue()
@@ -116,19 +113,6 @@ def test_controller_first_scan_runs_real_threaded_reader_pipeline(
             await asyncio.gather(runner, return_exceptions=True)
 
     asyncio.run(check())
-    messages = [record.getMessage() for record in caplog.records]
-    assert messages == [
-        "[DEBUG-readers] Draining queued OMNIKEY input",
-        "[DEBUG-readers] OMNIKEY drain finished: 0 events",
-        "[DEBUG-readers] Scheduling UID worker",
-        "[DEBUG-readers] RF-on command starting",
-        "[DEBUG-readers] RF-on acknowledged",
-        "[DEBUG-readers] UID read starting (timeout=5.0s)",
-        "[DEBUG-readers] UID read returned: card found",
-        "[DEBUG-readers] RF-off command starting",
-        "[DEBUG-readers] RF-off acknowledged",
-        "[DEBUG-readers] UID worker finished",
-    ]
 
 
 @pytest.mark.parametrize("prefix", ["", "1234567890\n", "123?56789\n", "12345\n", "12345"])

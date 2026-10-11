@@ -3,7 +3,7 @@ name = "kiosk"
 version = "0.1.0"
 description = "Makerspace access kiosk core"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = ["aiohttp"]
 
 [project.optional-dependencies]
 hardware = [

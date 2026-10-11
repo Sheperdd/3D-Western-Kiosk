@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Callable
 
 from kiosk.events import (
     ActivateUid,
@@ -78,10 +79,25 @@ async def fake_register_and_activate(
 # Laptop demo settings; production durations still need agreement.
 DEMO_TIMEOUT_SECONDS: dict[TimeoutName, float] = {
     TimeoutName.SESSION: 10.0,
-    TimeoutName.RESULT: 2.0,
 }
 DEMO_BACKEND_DELAY = 0.001
 STUDENT_NUMBER_TIMEOUT = 10.0  # After UID/RF handover; waiting for a card has no deadline.
+
+# Timers for the displays
+RESULT_DURATION_SECONDS: dict[Outcome, float] = {
+    Outcome.ACTIVATED: 10.0,
+    Outcome.ALREADY_ACTIVE: 10.0,
+    Outcome.REGISTERED_AND_ACTIVE: 10.0,
+    Outcome.REPLACED_AND_ACTIVE: 10.0,
+    Outcome.UNKNOWN_STUDENT: 30.0,
+    Outcome.MISSING_INDUCTION: 30.0,
+    Outcome.DENIED: 10.0,
+    Outcome.UID_CONFLICT: 10.0,
+    Outcome.READ_AGAIN: 6.0,
+    Outcome.SESSION_EXPIRED: 6.0,
+}
+
+MIN_CHECKING_SECONDS = 2.5
 
 
 def dispatch(
@@ -91,11 +107,18 @@ def dispatch(
     background_tasks: set[asyncio.Task[None]],
     *,
     hardware_mode: bool = False,
+    outcome: Outcome | None = None,
 ) -> None:
     if isinstance(effect, StartTimeout):
+        if effect.name == TimeoutName.RESULT:
+            if outcome is None:
+                raise ValueError("Result timer requires an outcome")
+            seconds = RESULT_DURATION_SECONDS[outcome]
+        else:
+            seconds = DEMO_TIMEOUT_SECONDS[effect.name]
         if (effect.session_id, effect.name) in timers:
             timers[(effect.session_id, effect.name)].cancel()
-        timer = asyncio.create_task(fire_timeout(queue, effect, DEMO_TIMEOUT_SECONDS[effect.name]))
+        timer = asyncio.create_task(fire_timeout(queue, effect, seconds))
         timers[(effect.session_id, effect.name)] = timer
         background_tasks.add(timer)
         timer.add_done_callback(background_tasks.discard)
@@ -131,6 +154,7 @@ async def run(
     hardware_mode: bool = False,
     uid_reader=None,
     student_reader=None,
+    on_state_change: Callable[[KioskState, Outcome | None], None] | None = None,
 ) -> None:
     if hardware_mode and (uid_reader is None or student_reader is None):
         raise ValueError("Hardware mode requires both uid_reader and student_reader")
@@ -145,6 +169,10 @@ async def run(
     acquired_scan: CardRead | BadScan | ReaderFault | None = None
     admission_revoked = False
     next_event: asyncio.Task[Event] | None = None
+
+    loop = asyncio.get_running_loop()
+    checking_until: float | None = None
+    pending_result_timer: StartTimeout | None = None
 
     async def acquire_card() -> None:
         nonlocal acquired_scan
@@ -174,6 +202,9 @@ async def run(
             queue.put_nowait(acquired_scan)
 
     try:
+        if on_state_change is not None:
+            on_state_change(state, context.outcome)
+
         while True:
             if next_event is None:
                 next_event = asyncio.create_task(queue.get())
@@ -197,15 +228,28 @@ async def run(
                     ):
                         admission_revoked = True
                     print("Processing event:", type(event).__name__)
+
+                    previous_state = state
+
                     state, context, effects = handle(state, context, event)
+
+                    if previous_state != KioskState.ACTIVATING and state == KioskState.ACTIVATING:
+                        checking_until = loop.time() + MIN_CHECKING_SECONDS
+
+                    if on_state_change is not None:
+                        on_state_change(state, context.outcome)
                     print("State: ", state.name, "Outcome: ", context.outcome)
                     for effect in effects:
+                        if isinstance(effect, StartTimeout) and effect.name == TimeoutName.RESULT:
+                            pending_result_timer = effect
+                            continue
                         dispatch(
                             queue,
                             effect,
                             timers,
                             background_tasks,
                             hardware_mode=hardware_mode,
+                            outcome=context.outcome,
                         )
             if hardware_mode:
                 ready = (

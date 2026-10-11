@@ -222,7 +222,7 @@ def test_hardware_acquisition_waits_for_readiness_and_rearms_when_ready(
         monkeypatch.setattr(readers, "read_uid_async", read_uid)
         monkeypatch.setattr(readers, "read_student_number_async", read_student_number)
         monkeypatch.setattr(controller, "DEMO_BACKEND_DELAY", 0)
-        monkeypatch.setitem(controller.DEMO_TIMEOUT_SECONDS, TimeoutName.RESULT, 0)
+        monkeypatch.setitem(controller.RESULT_DURATION_SECONDS, Outcome.ACTIVATED, 0)
         runner = asyncio.create_task(
             controller.run(
                 queue,
@@ -692,17 +692,32 @@ def test_timer_emits_matching_session_and_name(name: TimeoutName) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "expected_seconds"),
-    [(TimeoutName.SESSION, 13.0), (TimeoutName.RESULT, 3.0)],
+    ("name", "outcome", "expected_seconds"),
+    [
+        (TimeoutName.SESSION, None, 13.0),
+        (TimeoutName.RESULT, Outcome.ACTIVATED, 10.0),
+        (TimeoutName.RESULT, Outcome.ALREADY_ACTIVE, 10.0),
+        (TimeoutName.RESULT, Outcome.REGISTERED_AND_ACTIVE, 10.0),
+        (TimeoutName.RESULT, Outcome.REPLACED_AND_ACTIVE, 10.0),
+        (TimeoutName.RESULT, Outcome.UNKNOWN_STUDENT, 30.0),
+        (TimeoutName.RESULT, Outcome.MISSING_INDUCTION, 30.0),
+        (TimeoutName.RESULT, Outcome.DENIED, 10.0),
+        (TimeoutName.RESULT, Outcome.UID_CONFLICT, 10.0),
+        (TimeoutName.RESULT, Outcome.READ_AGAIN, 6.0),
+        (TimeoutName.RESULT, Outcome.SESSION_EXPIRED, 6.0),
+    ],
 )
 def test_timer_dispatch_uses_configured_duration(
-    monkeypatch: pytest.MonkeyPatch, name: TimeoutName, expected_seconds: float
+    monkeypatch: pytest.MonkeyPatch,
+    name: TimeoutName,
+    outcome: Outcome | None,
+    expected_seconds: float,
 ) -> None:
     async def check() -> None:
         monkeypatch.setattr(
             controller,
             "DEMO_TIMEOUT_SECONDS",
-            {TimeoutName.SESSION: 13.0, TimeoutName.RESULT: 3.0},
+            {TimeoutName.SESSION: 13.0},
         )
         durations: list[float] = []
 
@@ -712,7 +727,7 @@ def test_timer_dispatch_uses_configured_duration(
         monkeypatch.setattr(controller.asyncio, "sleep", record_delay)
         queue: asyncio.Queue[Event] = asyncio.Queue()
         tasks: set[asyncio.Task[None]] = set()
-        controller.dispatch(queue, StartTimeout(8, name), {}, tasks)
+        controller.dispatch(queue, StartTimeout(8, name), {}, tasks, outcome=outcome)
         await asyncio.gather(*tasks)
         assert durations == [expected_seconds]
         assert queue.get_nowait() == Timeout(8, name)
@@ -721,8 +736,35 @@ def test_timer_dispatch_uses_configured_duration(
     asyncio.run(check())
 
 
+@pytest.mark.parametrize(
+    ("outcome", "error"), [(None, ValueError), (Outcome.UNREGISTERED, KeyError)]
+)
+def test_result_timer_rejects_missing_or_nonfinal_outcome(outcome, error) -> None:
+    async def check() -> None:
+        queue: asyncio.Queue[Event] = asyncio.Queue()
+        key = (8, TimeoutName.RESULT)
+        old_task = asyncio.create_task(controller.fire_timeout(queue, StartTimeout(*key), 60))
+        timers: dict[tuple[int, TimeoutName], asyncio.Task[None]] = {key: old_task}
+        tasks: set[asyncio.Task[None]] = {old_task}
+        try:
+            with pytest.raises(error):
+                controller.dispatch(queue, StartTimeout(*key), timers, tasks, outcome=outcome)
+            assert timers == {key: old_task}
+            assert tasks == {old_task}
+            assert old_task.cancelling() == 0
+            assert queue.empty()
+        finally:
+            old_task.cancel()
+            await asyncio.gather(old_task, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("name", list(TimeoutName))
 @pytest.mark.parametrize("replace", [False, True], ids=["cancel", "replace"])
-def test_timer_dispatch_cancels_old_task(monkeypatch: pytest.MonkeyPatch, replace: bool) -> None:
+def test_timer_dispatch_cancels_old_task(
+    monkeypatch: pytest.MonkeyPatch, replace: bool, name: TimeoutName
+) -> None:
     async def check() -> None:
         queue: asyncio.Queue[Event] = asyncio.Queue()
         timers: dict[tuple[int, TimeoutName], asyncio.Task[None]] = {}
@@ -735,14 +777,14 @@ def test_timer_dispatch_cancels_old_task(monkeypatch: pytest.MonkeyPatch, replac
 
         controller_original_timer = controller.fire_timeout
         monkeypatch.setattr(controller, "fire_timeout", controlled_timer)
-        start = StartTimeout(1, TimeoutName.SESSION)
+        start = StartTimeout(1, name)
         key = (start.session_id, start.name)
-        controller.dispatch(queue, start, timers, tasks)
+        controller.dispatch(queue, start, timers, tasks, outcome=Outcome.ACTIVATED)
         old_task = timers[key]
         await asyncio.sleep(0)  # Let the original timer start waiting.
 
         if replace:
-            controller.dispatch(queue, start, timers, tasks)
+            controller.dispatch(queue, start, timers, tasks, outcome=Outcome.ACTIVATED)
             assert timers[key] is not old_task
         else:
             controller.dispatch(queue, CancelTimeout(*key), timers, tasks)
@@ -765,14 +807,14 @@ def test_timer_dispatch_cancels_old_task(monkeypatch: pytest.MonkeyPatch, replac
 
 def test_cancellation_does_not_touch_other_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     async def check() -> None:
-        for name in TimeoutName:
-            monkeypatch.setitem(controller.DEMO_TIMEOUT_SECONDS, name, 0)
+        monkeypatch.setitem(controller.DEMO_TIMEOUT_SECONDS, TimeoutName.SESSION, 0)
+        monkeypatch.setitem(controller.RESULT_DURATION_SECONDS, Outcome.ACTIVATED, 0)
         queue: asyncio.Queue[Event] = asyncio.Queue()
         timers: dict[tuple[int, TimeoutName], asyncio.Task[None]] = {}
         tasks: set[asyncio.Task[None]] = set()
         keys = [(1, TimeoutName.SESSION), (1, TimeoutName.RESULT), (2, TimeoutName.SESSION)]
         for key in keys:
-            controller.dispatch(queue, StartTimeout(*key), timers, tasks)
+            controller.dispatch(queue, StartTimeout(*key), timers, tasks, outcome=Outcome.ACTIVATED)
         scheduled = list(timers.values())
         controller.dispatch(queue, CancelTimeout(*keys[0]), timers, tasks)
         await asyncio.gather(*scheduled, return_exceptions=True)
@@ -967,6 +1009,7 @@ def test_shutdown_awaits_removed_timer_cleanup(
             background_tasks,
             *,
             hardware_mode: bool = False,
+            outcome: Outcome | None = None,
         ):
             nonlocal captured_timers, captured_tasks
             captured_timers = timers
@@ -977,6 +1020,7 @@ def test_shutdown_awaits_removed_timer_cleanup(
                 timers,
                 background_tasks,
                 hardware_mode=hardware_mode,
+                outcome=outcome,
             )
 
         async def timer(queue, effect, seconds):
