@@ -80,7 +80,8 @@ async def fake_register_and_activate(
 DEMO_TIMEOUT_SECONDS: dict[TimeoutName, float] = {
     TimeoutName.SESSION: 10.0,
 }
-DEMO_BACKEND_DELAY = 0.001
+DEMO_ACTIVATION_DELAY = 2.5
+DEMO_REGISTRATION_DELAY = 0.001
 STUDENT_NUMBER_TIMEOUT = 10.0  # After UID/RF handover; waiting for a card has no deadline.
 
 # Timers for the displays
@@ -96,8 +97,6 @@ RESULT_DURATION_SECONDS: dict[Outcome, float] = {
     Outcome.READ_AGAIN: 6.0,
     Outcome.SESSION_EXPIRED: 6.0,
 }
-
-MIN_CHECKING_SECONDS = 2.5
 
 
 def dispatch(
@@ -131,7 +130,7 @@ def dispatch(
     elif isinstance(effect, ActivateUid):
         outcome = Outcome.ACTIVATED if hardware_mode else Outcome.UNREGISTERED
         backend_task = asyncio.create_task(
-            fake_activate_uid(queue, effect, DEMO_BACKEND_DELAY, outcome)
+            fake_activate_uid(queue, effect, DEMO_ACTIVATION_DELAY, outcome)
         )
         background_tasks.add(backend_task)
         backend_task.add_done_callback(background_tasks.discard)
@@ -139,7 +138,9 @@ def dispatch(
     elif isinstance(effect, RegisterAndActivate):
         backend_task = asyncio.create_task(
             fake_register_and_activate(
-                queue, effect, DEMO_BACKEND_DELAY, failure=FailureKind.UNKNOWN
+                queue,
+                effect,
+                DEMO_REGISTRATION_DELAY,
             )
         )
         background_tasks.add(backend_task)
@@ -169,10 +170,6 @@ async def run(
     acquired_scan: CardRead | BadScan | ReaderFault | None = None
     admission_revoked = False
     next_event: asyncio.Task[Event] | None = None
-
-    loop = asyncio.get_running_loop()
-    checking_until: float | None = None
-    pending_result_timer: StartTimeout | None = None
 
     async def acquire_card() -> None:
         nonlocal acquired_scan
@@ -229,20 +226,14 @@ async def run(
                         admission_revoked = True
                     print("Processing event:", type(event).__name__)
 
-                    previous_state = state
-
                     state, context, effects = handle(state, context, event)
 
-                    if previous_state != KioskState.ACTIVATING and state == KioskState.ACTIVATING:
-                        checking_until = loop.time() + MIN_CHECKING_SECONDS
-
+                    # If the state has changed, call to change the display
                     if on_state_change is not None:
                         on_state_change(state, context.outcome)
+
                     print("State: ", state.name, "Outcome: ", context.outcome)
                     for effect in effects:
-                        if isinstance(effect, StartTimeout) and effect.name == TimeoutName.RESULT:
-                            pending_result_timer = effect
-                            continue
                         dispatch(
                             queue,
                             effect,

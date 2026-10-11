@@ -99,6 +99,7 @@ def test_controller_first_scan_runs_real_threaded_reader_pipeline(
 
         monkeypatch.setattr(controller, "handle", observe)
         monkeypatch.setattr(controller, "fire_timeout", timer)
+        monkeypatch.setattr(controller, "DEMO_ACTIVATION_DELAY", 0)
         queue.put_nowait(BackendOnline())
         queue.put_nowait(ReaderReady(0))
         runner = asyncio.create_task(
