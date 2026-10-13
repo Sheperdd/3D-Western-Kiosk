@@ -2,12 +2,151 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <script src="app.js" defer></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="/app.js" defer></script>
     <title>3D Western Kiosk</title>
+    <style>
+      :root { font-family: "Segoe UI", Arial, sans-serif; color: #241d33; background: #f4f2f7; font-synthesis: none; --accent: #4f2683; --tint: #eee7f7; --muted: #625a70; }
+      * { box-sizing: border-box; }
+      body { margin: 0; min-height: 100vh; }
+      [hidden] { display: none !important; }
+      .shell { max-width: 1600px; margin: auto; padding: clamp(20px, 4vw, 64px); }
+      header, footer, .brand, .demo, .availability { display: flex; align-items: center; }
+      header { justify-content: space-between; gap: 24px; padding-bottom: 32px; }
+      .brand { gap: 14px; }
+      .brand-mark { display: grid; place-items: center; width: 58px; height: 58px; background: #4f2683; color: white; font-size: 23px; font-weight: 800; border-radius: 16px 16px 4px 16px; }
+      .brand-name { font-size: 23px; font-weight: 750; letter-spacing: -.5px; }
+      .brand-subtitle { color: var(--muted); font-size: 14px; margin-top: 2px; }
+      .demo { gap: 8px; padding: 10px 14px; border: 1px solid #d8cde7; border-radius: 8px; background: #eee7f7; color: #4f2683; font-size: 14px; font-weight: 650; }
+      .demo::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #4f2683; }
+      .student-layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 24px; }
+      .student-card { background: white; border: 1px solid #e2dce9; border-top: 6px solid var(--accent); border-radius: 20px; padding: clamp(28px, 4vw, 56px); min-height: 560px; display: flex; flex-direction: column; align-items: flex-start; }
+      body[data-tone="success"] { --accent: #176348; --tint: #e5f3eb; }
+      body[data-tone="attention"] { --accent: #855100; --tint: #fff2d9; }
+      body[data-tone="unavailable"] { --accent: #933744; --tint: #faebee; }
+      .status-icon { width: 78px; height: 78px; border-radius: 20px; background: var(--tint); color: var(--accent); display: grid; place-items: center; margin-bottom: 28px; }
+      .status-icon svg { width: 42px; height: 42px; }
+      body[data-tone="busy"] .status-icon svg { animation: turn 2.5s linear infinite; }
+      @keyframes turn { to { transform: rotate(360deg); } }
+      .eyebrow { color: var(--accent); font-size: 14px; font-weight: 750; letter-spacing: 2px; text-transform: uppercase; margin: 0 0 14px; }
+      h1 { font-size: clamp(34px, 4vw, 60px); line-height: 1.08; letter-spacing: -1.5px; margin: 0; max-width: 850px; text-wrap: balance; }
+      .message { font-size: clamp(20px, 2vw, 27px); line-height: 1.5; color: var(--muted); margin: 24px 0 28px; max-width: 800px; }
+      .next-step { border-top: 1px solid #e9e4ef; padding-top: 20px; margin: auto 0 0; width: 100%; font-size: 17px; line-height: 1.5; color: var(--muted); }
+      .side-note { background: #e9e2f1; padding: 30px 26px; border-radius: 20px; }
+      .side-note h2 { font-size: 27px; line-height: 1.2; color: #4f2683; margin: 0 0 28px; }
+      .steps { list-style: none; padding: 0; margin: 0; counter-reset: steps; }
+      .steps li { counter-increment: steps; display: grid; grid-template-columns: 30px 1fr; gap: 12px; line-height: 1.5; margin: 0 0 26px; font-size: 18px; }
+      .steps li::before { content: counter(steps, decimal-leading-zero); color: #4f2683; font-weight: 750; font-size: 15px; padding-top: 3px; }
+      .side-note p { border-top: 1px solid #cfc2df; padding-top: 22px; font-size: 16px; line-height: 1.6; color: #514361; }
+      .access-details { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; width: 100%; margin-bottom: 26px; }
+      .detail { padding: 20px; border-radius: 12px; background: #f5f7f5; }
+      .detail h2 { font-size: 16px; margin: 0 0 10px; }
+      .detail p { font-size: 19px; line-height: 1.4; margin: 0; color: var(--muted); }
+      .qr-panel { display: flex; gap: 22px; align-items: center; padding: 22px; background: var(--tint); border-radius: 12px; width: 100%; margin-bottom: 26px; }
+      .qr-placeholder { flex: 0 0 112px; height: 112px; border: 2px dashed var(--accent); border-radius: 10px; display: grid; place-items: center; color: var(--accent); font-size: 18px; font-weight: 700; text-align: center; }
+      .qr-panel h2 { margin: 0 0 8px; font-size: 22px; }
+      .qr-panel p { margin: 0; color: var(--muted); line-height: 1.5; font-size: 18px; }
+      .public-heading { margin: 12px 0 30px; }
+      .public-heading p:last-child { color: var(--muted); font-size: 23px; line-height: 1.5; margin: 18px 0 0; }
+      .availability { gap: 18px; padding: 22px 28px; background: var(--tint); border: 1px solid var(--accent); border-radius: 14px; margin-bottom: 28px; color: var(--accent); }
+      .availability svg { flex: 0 0 32px; width: 32px; height: 32px; }
+      .availability p { margin: 0; font-size: 24px; font-weight: 700; }
+      .availability span { display: block; margin-top: 5px; font-size: 18px; line-height: 1.4; }
+      .guides { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
+      .guide { background: white; border: 1px solid #e2dce9; border-radius: 16px; padding: 28px; }
+      .guide-number { color: #4f2683; font-size: 15px; letter-spacing: 2px; font-weight: 750; }
+      .guide h2 { font-size: 26px; margin: 16px 0 22px; }
+      .guide ul, .guide ol { padding-left: 22px; margin: 0; }
+      .guide li { font-size: 19px; line-height: 1.5; margin-bottom: 16px; padding-left: 4px; }
+      .guide li:last-child { margin-bottom: 0; }
+      footer { justify-content: space-between; gap: 20px; margin-top: 26px; color: var(--muted); font-size: 15px; line-height: 1.5; }
+      footer strong { color: #4f2683; }
+      noscript p { padding: 24px; background: #faebee; color: #933744; font-size: 24px; }
+      @media (min-width: 1500px) { .student-card { min-height: 650px; } .guide li { font-size: 22px; } }
+      @media (max-width: 900px) {
+        .student-layout { grid-template-columns: 1fr; }
+        .side-note { display: none; }
+        .student-card { min-height: 520px; }
+        .guides { grid-template-columns: 1fr 1fr; }
+        .guide:first-child { grid-column: 1 / -1; }
+        .guide:first-child ol { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+      }
+      @media (min-width: 901px) and (max-height: 800px) {
+        .shell { padding: 24px; }
+        header { padding-bottom: 22px; }
+        .student-card { min-height: 500px; padding: 32px; }
+        h1 { font-size: 40px; }
+        .public-heading { margin: 0 0 20px; }
+        .public-heading p:last-child { font-size: 20px; margin-top: 12px; }
+        .availability { padding: 16px 22px; margin-bottom: 20px; }
+        .guide { padding: 22px; }
+        .guide h2 { font-size: 23px; margin: 12px 0 18px; }
+        .guide li { font-size: 18px; line-height: 1.4; margin-bottom: 12px; }
+      }
+      @media (max-width: 600px) {
+        header { align-items: flex-start; flex-direction: column; gap: 18px; padding-bottom: 24px; }
+        .student-card { min-height: 480px; padding: 24px; }
+        .access-details { grid-template-columns: 1fr; }
+        .guides { grid-template-columns: 1fr; }
+        .guide:first-child ol { display: block; }
+        .qr-panel { flex-direction: column; align-items: flex-start; }
+        .qr-placeholder { flex-basis: auto; width: 112px; }
+        footer { align-items: flex-start; flex-direction: column; gap: 8px; }
+      }
+      @media (prefers-reduced-motion: reduce) { body[data-tone="busy"] .status-icon svg { animation: none; } }
+    </style>
   </head>
-  <body>
-    <p>DEMO</p>
-    <h1 id="screen">Waiting for display data...</h1>
-    <p id="labels">The kiosk page has loaded</p>
+  <body data-tone="busy">
+    <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true" style="position: absolute">
+      <symbol id="icon-card" viewBox="0 0 32 32"><rect x="3" y="6" width="26" height="20" rx="4"/><path d="M3 13h26M8 20h6"/></symbol>
+      <symbol id="icon-check" viewBox="0 0 32 32"><circle cx="16" cy="16" r="13"/><path d="m9 16 5 5 9-10"/></symbol>
+      <symbol id="icon-wait" viewBox="0 0 32 32"><path d="M16 3a13 13 0 1 1-13 13"/><circle cx="5" cy="7" r="1"/></symbol>
+      <symbol id="icon-help" viewBox="0 0 32 32"><circle cx="16" cy="16" r="13"/><path d="M12 12a4 4 0 1 1 6 3.5c-2 1-2 2-2 3M16 23v1"/></symbol>
+      <symbol id="icon-alert" viewBox="0 0 32 32"><path d="M14 5a2.3 2.3 0 0 1 4 0l12 21H2ZM16 12v7M16 23v1"/></symbol>
+    </svg>
+    <div class="shell">
+      <header>
+        <div class="brand"><div class="brand-mark" aria-hidden="true">3D</div><div><div class="brand-name">3D Western</div><div class="brand-subtitle">Makerspace · Student access</div></div></div>
+        <div class="demo">Demo — no real access changes</div>
+      </header>
+      <noscript><p>This display needs JavaScript. Please contact the makerspace team.</p></noscript>
+      <main>
+        <section id="student-view" class="student-layout" aria-label="Student check-in">
+          <div class="student-card" role="status" aria-live="polite" aria-atomic="true">
+            <div class="status-icon" aria-hidden="true"><svg fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use id="student-icon" href="#icon-wait"/></svg></div>
+            <p id="eyebrow" class="eyebrow">Please wait</p>
+            <h1 id="screen">Starting kiosk</h1>
+            <p id="message" class="message">Please wait while the kiosk gets ready.</p>
+            <div id="access-details" class="access-details" hidden>
+              <section class="detail"><h2>Your training level</h2><p>Training level unavailable</p></section>
+              <section class="detail"><h2>Machines you can access</h2><p>Machine access details unavailable</p></section>
+            </div>
+            <section id="qr-panel" class="qr-panel" hidden>
+              <div class="qr-placeholder" aria-hidden="true">QR<br/>not available</div>
+              <div><h2 id="qr-title">Signup information</h2><p>Signup link not available in this demo. Contact the makerspace team for help.</p></div>
+            </section>
+            <p id="next-step" class="next-step">This screen updates automatically.</p>
+          </div>
+          <aside class="side-note">
+            <h2>Your card.<br/>Your visit.</h2>
+            <ol class="steps"><li>Present your own student card.</li><li>Hold it in place until prompted to remove it.</li><li>Use your card at tools you are trained to use.</li></ol>
+            <p>Need a hand?<br/>Contact the makerspace team.</p>
+          </aside>
+        </section>
+        <section id="general-view" aria-label="Makerspace guidance" hidden>
+          <div class="public-heading"><p class="eyebrow">Make something great</p><h1>Using the makerspace</h1><p>A shared space to learn, build and create responsibly.</p></div>
+          <div class="availability" role="status" aria-live="polite" aria-atomic="true">
+            <svg aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><use id="general-icon" href="#icon-wait"/></svg>
+            <div><p id="public-status">Starting up — please wait</p><span id="public-message">The kiosk is getting ready.</span></div>
+          </div>
+          <div class="guides">
+            <section class="guide"><span class="guide-number">01 / CHECK IN</span><h2>Start with your card</h2><ol><li>Present your student card to activate your visit.</li><li>Hold it in place until the other screen says to remove it.</li><li>Use your card at tools you are trained to use.</li></ol></section>
+            <section class="guide"><span class="guide-number">02 / WORK RESPONSIBLY</span><h2>Know your tools</h2><ul><li>Use only machines you are trained and authorised to use.</li><li>Follow posted instructions and required protective-equipment rules.</li><li>Ask the makerspace team if you are unsure.</li><li>Use your own card. Do not lend it to someone else.</li></ul></section>
+            <section class="guide"><span class="guide-number">03 / SHARE THE SPACE</span><h2>Leave it ready</h2><ul><li>Respect other users and give people room to work.</li><li>Keep walkways and shared work areas clear.</li><li>Clean your workspace and return shared tools.</li><li>Report damaged equipment or unsafe conditions.</li></ul></section>
+          </div>
+        </section>
+      </main>
+      <footer><span><strong>Need help?</strong> Contact the makerspace team.</span><span>Follow local safety rules and machine instructions.</span></footer>
+    </div>
   </body>
 </html>

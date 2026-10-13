@@ -49,9 +49,16 @@ async def main(device: str | None = None) -> None:
         if device is None:
             queue.put_nowait(BackendOnline())
             queue.put_nowait(ReaderReady(0))
-            queue.put_nowait(CardRead(1, "1234567890", "000123456"))
-            queue.put_nowait(IdentityConfirmed(1, "1234567890", "000123456"))
-            await run(queue, on_state_change=update_display)
+
+            def demo_scan() -> None:
+                queue.put_nowait(CardRead(1, "1234567890", "000123456"))
+                queue.put_nowait(IdentityConfirmed(1, "1234567890", "000123456"))
+
+            scan_timer = asyncio.get_running_loop().call_later(10.0, demo_scan)
+            try:
+                await run(queue, on_state_change=update_display)
+            finally:
+                scan_timer.cancel()
 
         else:
             from kiosk.readers import open_readers

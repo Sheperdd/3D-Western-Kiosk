@@ -128,6 +128,8 @@ def dispatch(
             del timers[(effect.session_id, effect.name)]
 
     elif isinstance(effect, ActivateUid):
+        # In demo mode, we simulate a backend response after a delay. Change the outcome
+        # after the else to simulate different backend responses.
         outcome = Outcome.ACTIVATED if hardware_mode else Outcome.UNREGISTERED
         backend_task = asyncio.create_task(
             fake_activate_uid(queue, effect, DEMO_ACTIVATION_DELAY, outcome)
@@ -141,6 +143,7 @@ def dispatch(
                 queue,
                 effect,
                 DEMO_REGISTRATION_DELAY,
+                failure=None if hardware_mode else FailureKind.UNKNOWN,
             )
         )
         background_tasks.add(backend_task)

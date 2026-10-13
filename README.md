@@ -2,7 +2,7 @@
 
 A student-card registration and daily tool-access kiosk for 3D-Western. Students use their existing campus cards instead of borrowing separate RFID cards.
 
-**Status:** the controller collects the UID and student number before starting simulated backend processing, then rearms after result feedback and reader cleanup. Card removal is assumed, not detected. Real backend integration, validated same-card identity, and displays remain pending. Start with [the implemented transitions and next work](docs/plan.md#7-core-migration-implemented-and-next-work), [glossary](CONTEXT.md), and [open questions](TODO.md).
+**Status:** the controller collects the UID and student number before starting simulated backend processing, then rearms after result feedback and reader cleanup. Both dummy displays render controller state through the local web app. Card removal is assumed, not detected. Real backend integration and validated same-card identity remain pending. Start with [the implemented transitions and next work](docs/plan.md#7-core-migration-implemented-and-next-work), [glossary](CONTEXT.md), and [open questions](TODO.md).
 
 ## Intended student flow
 
@@ -47,6 +47,23 @@ Run checks in the activated virtual environment. If Pyright cannot locate its in
 
 The pure state machine uses `handle(state, context, event)` to return a new state, context, and effects without I/O. A complete `CardRead` starts backend activation; an unregistered UID proceeds to registration only with a separately confirmed identity pair. Raw observed numbers cannot authorize registration or replacement. Results and timers are scoped to the interaction. Lost write responses hold the machine in `OUTCOME_UNKNOWN`; reconnection alone does not release that hold.
 
-Run `python -u -m kiosk --device /dev/input/eventX` on the Pi using the identified OMNIKEY path. Hold the card through the student-number beep, then take it back. Both identifiers print before the simulated backend result. After the result display (currently 2 seconds), `Ready for next card.` marks automatic rearming; no restart is needed. Missing student-number input expires after `STUDENT_NUMBER_TIMEOUT` (currently 10 seconds) with no backend call, then follows the same feedback/rearm flow. The controller waits for reader cleanup and backend/reader readiness before acquiring again. Card removal is assumed: a held card may be processed again. Raw identifier prints remain for local testing and must be removed or gated before production.
+Run `python -u -m kiosk --device /dev/input/eventX` on the Pi using the identified OMNIKEY path. Hold the card through the student-number beep, then take it back. Both identifiers print before the simulated backend result. After the outcome-specific result display, `Ready for next card.` marks automatic rearming; no restart is needed. Missing student-number input expires after `STUDENT_NUMBER_TIMEOUT` (currently 10 seconds) with no backend call, then follows the same feedback/rearm flow. The controller waits for reader cleanup and backend/reader readiness before acquiring again. Card removal is assumed: a held card may be processed again. Raw identifier prints remain for local testing and must be removed or gated before production.
 
-The tests cover the core's decisions using synthetic events. They do not establish physical same-card assurance, backend persistence, replacement invalidation, midnight expiry, or tool enforcement. The internal event/effect names are provisional and do not specify network endpoints. See [plan section 7](docs/plan.md#7-core-migration-implemented-and-next-work) for controller obligations and integration work. Shane normally writes implementation with mentor support; this core migration was explicitly delegated.
+## Dummy displays
+
+Run `python -m kiosk` and open both pages on the kiosk computer:
+
+- Student display: <http://127.0.0.1:8000/?display=1>
+- Public guidance: <http://127.0.0.1:8000/?display=2>
+
+The desktop demo waits 10 seconds after starting the web server before sending one simulated card scan, leaving the ready screen visible during the pause. Keep the pages open and restart the process to replay it; refreshing a page does not restart the interaction. The displays poll every 250 ms and recover automatically after a connection failure. Python owns state transitions and result durations: success/assistance 10 seconds, signup/training 30 seconds, retry 6 seconds. Activation simulates 2.5 seconds of backend latency; there is no guaranteed minimum visible checking time.
+
+Every controller state and final outcome has student-facing copy. The public display only shows general guidance and availability. Neither displays student identifiers. Success screens show unavailable training/machine details until the backend supplies them. Signup and induction screens have clearly labelled, non-scannable placeholders until approved URLs are available. All screens are visibly marked as a demo.
+
+The UI uses plain HTML, CSS and JavaScript with no build step or external assets. Run its rendering and polling tests with Node.js 18 or newer:
+
+```sh
+node --test tests/test_display_ui.cjs
+```
+
+Review the wording and check readability on the actual kiosk monitors before deployment. The tests cover the core's decisions using synthetic events. They do not establish physical same-card assurance, backend persistence, replacement invalidation, midnight expiry, or tool enforcement. The internal event/effect names are provisional and do not specify network endpoints. See [plan section 7](docs/plan.md#7-core-migration-implemented-and-next-work) for controller obligations and integration work. Shane normally writes implementation with mentor support; this core migration and the dummy frontend were explicitly delegated.

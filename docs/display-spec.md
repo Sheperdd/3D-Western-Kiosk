@@ -1,5 +1,7 @@
 # Kiosk display content
 
+**Implementation update, 2026-10-10:** Both dummy displays now render state/outcome messages, public guidance, and connection failures. Success/assistance, QR, and retry result durations are 10, 30, and 6 seconds respectively, owned by the controller. The minimum-display-time proposal below is deferred: the prototype simulates a 2.5-second activation response and keeps registration fast. It publishes results immediately. Training/machine details remain unavailable and QR destinations remain non-scannable placeholders. The remaining text records the original content proposal; its unimplemented presentation-delay and data-model proposals are not current behavior.
+
 Draft for discussion with Shane, 2026-10-08. This defines content and behavior, not an implemented UI. Confirmed: QR screens last 30 seconds; success screens last 10 seconds; neither display shows student identifiers; display 1 shows the student's training level and accessible machines; display 2 includes general makerspace instructions and conduct guidance. Exact copy, other durations, training labels, URLs, and support details remain proposals.
 
 ## Display roles
