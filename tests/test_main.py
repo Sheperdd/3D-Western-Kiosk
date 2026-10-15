@@ -8,7 +8,6 @@ from kiosk.display import DISPLAY_DATA
 from kiosk.events import (
     BackendOnline,
     CardRead,
-    IdentityConfirmed,
     KioskState,
     Outcome,
     ReaderReady,
@@ -34,16 +33,17 @@ def test_display_callback_updates_shared_payloads(monkeypatch) -> None:
             (KioskState.REGISTERING, "IN USE"),
             (KioskState.RESULT, "IN USE"),
         ):
-            on_state_change(state, Outcome.ACTIVATED)
+            on_state_change(state, Outcome.ACTIVATED, state == KioskState.IDLE)
             assert app[DISPLAY_DATA] is display_data
-            assert display_data[1] == {"screen": state.name, "labels": ["ACTIVATED"]}
-            assert display_data[2] == {
-                "screen": "GENERAL INSTRUCTIONS",
-                "labels": [expected_status, "Makerspace guidance placeholder."],
-            }
+            assert display_data[1] == {"state": state.name, "outcome": "ACTIVATED"}
+            assert display_data[2] == {"status": expected_status}
 
-        on_state_change(KioskState.IDLE, None)
-        assert display_data[1] == {"screen": "IDLE", "labels": []}
+        on_state_change(KioskState.IDLE, None, False)
+        assert display_data[1] == {"state": "REARMING", "outcome": None}
+        assert display_data[2] == {"status": "IN USE"}
+        on_state_change(KioskState.IDLE, None, True)
+        assert display_data[1] == {"state": "IDLE", "outcome": None}
+        assert display_data[2] == {"status": "WAITING"}
 
     monkeypatch.setattr(entrypoint, "run", run)
     asyncio.run(entrypoint.main())
@@ -62,7 +62,7 @@ def test_demo_waits_ten_seconds_before_scan_and_cancels_timer(monkeypatch, cance
         assert queue.get_nowait() == BackendOnline()
         assert queue.get_nowait() == ReaderReady(0)
         assert queue.empty()
-        on_state_change(KioskState.IDLE, None)
+        on_state_change(KioskState.IDLE, None, True)
         schedule.assert_called_once()
         delay, scan = schedule.call_args.args
         assert delay == 10.0
@@ -70,7 +70,6 @@ def test_demo_waits_ten_seconds_before_scan_and_cancels_timer(monkeypatch, cance
             raise asyncio.CancelledError
         scan()
         assert queue.get_nowait() == CardRead(1, "1234567890", "000123456")
-        assert queue.get_nowait() == IdentityConfirmed(1, "1234567890", "000123456")
         assert queue.empty()
 
     async def check():

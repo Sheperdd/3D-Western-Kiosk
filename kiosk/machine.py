@@ -36,7 +36,7 @@ class Context:
     uid: str | None = None
     observed_student_number: str | None = None
     # Only IdentityConfirmed may populate this trusted registration input.
-    student_number: str | None = None
+    confirmed_student_number: str | None = None
     pending_op: BackendOp | None = None
     outcome: Outcome | None = None
     reason: str | None = None
@@ -93,7 +93,7 @@ def _end_session(ctx: Context, *, keep_pending: bool = False) -> tuple[Context, 
             ctx,
             uid=None,
             observed_student_number=None,
-            student_number=None,
+            confirmed_student_number=None,
             pending_op=ctx.pending_op if keep_pending else None,
             outcome=None,
             reason=None,
@@ -120,11 +120,11 @@ def _finish(
 
 
 def _register(ctx: Context) -> tuple[KioskState, Context, list[Effect]]:
-    assert ctx.uid is not None and ctx.student_number is not None
+    assert ctx.uid is not None and ctx.confirmed_student_number is not None
     return (
         KioskState.REGISTERING,
         replace(ctx, pending_op=BackendOp.REGISTER_AND_ACTIVATE),
-        [RegisterAndActivate(ctx.session_id, ctx.uid, ctx.student_number)],
+        [RegisterAndActivate(ctx.session_id, ctx.uid, ctx.confirmed_student_number)],
     )
 
 
@@ -207,7 +207,7 @@ def handle(
             # or starting registration from a cancelled activation's UNREGISTERED reply.
             return _abort(ctx)
         if event.outcome == Outcome.UNREGISTERED:
-            if ctx.student_number is not None:
+            if ctx.confirmed_student_number is not None:
                 return _register(ctx)
             return KioskState.AWAITING_IDENTITY, ctx, []
         return _finish(ctx, event.outcome, event.reason)
@@ -236,12 +236,12 @@ def handle(
             or not event.student_number.isascii()
             or not event.student_number.isdecimal()
             or event.student_number != ctx.observed_student_number
-            or ctx.student_number not in (None, event.student_number)
+            or ctx.confirmed_student_number not in (None, event.student_number)
         ):
             if ctx.pending_op is not None:
                 return _abort(ctx)
             return _finish(ctx, Outcome.READ_AGAIN)
-        ctx = replace(ctx, student_number=event.student_number)
+        ctx = replace(ctx, confirmed_student_number=event.student_number)
         if state == KioskState.AWAITING_IDENTITY:
             return _register(ctx)
         return state, ctx, []

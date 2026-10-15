@@ -12,6 +12,10 @@ const states = {
     message: "Hold your student card over the readers until this screen says you can remove it.",
     next: "One card at a time. Use your own student card.",
   },
+  REARMING: {
+    tone: "busy", icon: "wait", label: "Please wait", title: "Getting ready for the next card",
+    message: "Please wait before presenting another card.",
+  },
   ACTIVATING: {
     tone: "busy", icon: "wait", label: "Card read", title: "Checking your access",
     message: "You can remove your card now. Please wait while we check your visit.",
@@ -147,21 +151,26 @@ function render(view) {
 }
 
 function renderPayload(data) {
-  if (!data || typeof data.screen !== "string" || !Array.isArray(data.labels)
-      || !data.labels.every((label) => typeof label === "string")) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
     render(unavailable);
     return;
   }
 
   if (displayNumber === "2") {
-    const status = data.labels[0];
-    render(data.screen === "GENERAL INSTRUCTIONS" && Object.hasOwn(publicStatuses, status)
+    const status = data.status;
+    render(typeof status === "string" && Object.hasOwn(publicStatuses, status)
       ? publicStatuses[status] : unavailable);
     return;
   }
 
-  if (data.screen === "RESULT") {
-    const outcome = data.labels[0];
+  if (typeof data.state !== "string"
+      || (data.outcome !== null && typeof data.outcome !== "string")) {
+    render(unavailable);
+    return;
+  }
+
+  if (data.state === "RESULT") {
+    const outcome = data.outcome;
     if (!Object.hasOwn(outcomes, outcome)) {
       render(unavailable);
       return;
@@ -179,7 +188,7 @@ function renderPayload(data) {
     return;
   }
 
-  render(Object.hasOwn(states, data.screen) ? states[data.screen] : unavailable);
+  render(Object.hasOwn(states, data.state) ? states[data.state] : unavailable);
 }
 
 async function loadDisplay() {

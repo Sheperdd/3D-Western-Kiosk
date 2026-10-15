@@ -44,4 +44,4 @@ select = [
 [tool.pyright]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
-include = ["kiosk", "tests"]
+include = ["kiosk", "tests", "tools"]

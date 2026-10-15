@@ -1,42 +1,26 @@
-"""OMNIKEY diagnostic: print nine-digit scans; never register or activate cards."""
+"""Two-reader diagnostic: print unverified card pairs; never register or activate cards."""
 
 import argparse
-import time
+import asyncio
 
-from kiosk.readers import open_readers, read_characters, read_uid, student_numbers
+from kiosk.readers import open_readers, read_card_async
 
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("device", nargs="?", default="/dev/input/event4")
     args = parser.parse_args()
     try:
-        with open_readers(args.device) as (reader, device):
+        with open_readers(args.device) as (uid_reader, student_reader):
             print("Scan a card; Ctrl+C to stop.", flush=True)
 
             while True:
                 print("Waiting for UID...", flush=True)
 
-                uid = read_uid(reader)
-
-                if uid is None:
-                    print("No card detected; try again.", flush=True)
-                    continue
-
-                print(f"UID: {uid}", flush=True)
-
-                # Discard student-reader events received during the UID step.
-                while device.read_one() is not None:
-                    pass
-
-                print("Waiting for student number...", flush=True)
-
-                for number in student_numbers(read_characters(device)):
-                    print(f"Student number: {number}", flush=True)
-                    time.sleep(2)  # Avoid repeated scans of the same card.
-                    break
-    except KeyboardInterrupt:
-        print("\nStopped.")
+                if await read_card_async(uid_reader, student_reader) is None:
+                    print("Incomplete scan. Remove the card and try again.", flush=True)
+                # shortcut: the pause assumes card removal; add detection if required.
+                await asyncio.sleep(2)
     except OSError as error:
         parser.exit(
             1, f"Reader error: {error}. Check the device path/permissions and stop evtest.\n"
@@ -46,4 +30,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nStopped.")

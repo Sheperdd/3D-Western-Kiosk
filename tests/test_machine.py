@@ -65,7 +65,7 @@ def test_complete_pair_starts_activation_without_confirming_identity() -> None:
     assert state == KioskState.ACTIVATING
     assert ctx.uid == UID
     assert ctx.observed_student_number == STUDENT
-    assert ctx.student_number is None
+    assert ctx.confirmed_student_number is None
     assert ctx.pending_op == BackendOp.ACTIVATE_UID
     assert effects == [
         StartTimeout(1, TimeoutName.SESSION),
@@ -78,7 +78,13 @@ def test_incomplete_or_invalid_pair_never_starts_backend(student: str) -> None:
     state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, UID, student))
     assert state == KioskState.RESULT
     assert ctx.outcome == Outcome.READ_AGAIN
-    assert ctx.uid is ctx.observed_student_number is ctx.student_number is ctx.pending_op is None
+    assert (
+        ctx.uid
+        is ctx.observed_student_number
+        is ctx.confirmed_student_number
+        is ctx.pending_op
+        is None
+    )
     assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
 
 
@@ -94,7 +100,7 @@ def test_conflicting_raw_number_during_activation_cannot_become_trusted() -> Non
     state, ctx, _ = start()
     state, ctx, effects = handle(state, ctx, CardRead(1, UID, "000000002"))
     assert state == KioskState.OUTCOME_UNKNOWN
-    assert ctx.observed_student_number is ctx.student_number is None
+    assert ctx.observed_student_number is ctx.confirmed_student_number is None
     assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
 
 
@@ -106,7 +112,7 @@ def test_returning_student_supplies_both_and_every_new_tap_rechecks_backend(
     state, ctx, effects = handle(state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, outcome))
     assert state == KioskState.RESULT
     assert ctx.outcome == outcome
-    assert ctx.uid is ctx.student_number is ctx.pending_op is None
+    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
     assert StartTimeout(1, TimeoutName.RESULT) in effects
 
     # A held/repeated read cannot retrigger activation or extend the result timer.
@@ -137,7 +143,7 @@ def test_registration_and_replacement_accept_both_arrival_orders(
             assert ctx.outcome is None
             assert effects == []
     assert state == KioskState.REGISTERING
-    assert ctx.student_number == STUDENT
+    assert ctx.confirmed_student_number == STUDENT
     assert effects == [RegisterAndActivate(1, UID, STUDENT)]
     assert ctx.pending_op == BackendOp.REGISTER_AND_ACTIVATE
     # The registration phase shares the original deadline; it doesn't restart the clock.
@@ -149,7 +155,7 @@ def test_registration_and_replacement_accept_both_arrival_orders(
     )
     assert state == KioskState.RESULT
     assert ctx.outcome == outcome
-    assert ctx.uid is ctx.student_number is ctx.pending_op is None
+    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
     assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
 
 
@@ -166,7 +172,7 @@ def test_backend_denial_selects_feedback_without_any_followup_write(
     assert state == KioskState.RESULT
     assert ctx.outcome == outcome
     assert ctx.reason == "policy_reason"
-    assert ctx.uid is ctx.student_number is ctx.pending_op is None
+    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
     assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
 
 
@@ -196,7 +202,7 @@ def test_invalid_student_number_cannot_register(student: str) -> None:
     state, ctx, effects = handle(state, ctx, IdentityConfirmed(1, UID, student))
     assert state == KioskState.RESULT
     assert ctx.outcome == Outcome.READ_AGAIN
-    assert ctx.uid is ctx.student_number is None
+    assert ctx.uid is ctx.confirmed_student_number is None
     assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
 
 
@@ -213,7 +219,7 @@ def test_conflicting_capture_before_registration_discards_both_identifiers(event
     state, ctx, effects = handle(state, ctx, event)
     assert state == KioskState.RESULT
     assert ctx.outcome == Outcome.READ_AGAIN
-    assert ctx.uid is ctx.student_number is ctx.pending_op is None
+    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
     assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
 
 
@@ -222,7 +228,7 @@ def test_conflicting_student_numbers_during_activation_do_not_overwrite_the_firs
     state, ctx, _ = handle(state, ctx, IDENTITY)
     state, ctx, effects = handle(state, ctx, IdentityConfirmed(1, UID, "000000002"))
     assert state == KioskState.OUTCOME_UNKNOWN
-    assert ctx.uid is ctx.student_number is None
+    assert ctx.uid is ctx.confirmed_student_number is None
     assert ctx.pending_op == BackendOp.ACTIVATE_UID
     assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
 
@@ -236,7 +242,7 @@ def test_missing_identity_expires_without_registration() -> None:
     state, ctx, effects = handle(state, ctx, Timeout(1, TimeoutName.SESSION))
     assert state == KioskState.RESULT
     assert ctx.outcome == Outcome.SESSION_EXPIRED
-    assert ctx.uid is ctx.student_number is ctx.pending_op is None
+    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
     assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
 
 
@@ -244,7 +250,7 @@ def test_cancel_a_start_b_then_delayed_a_events_cannot_affect_b() -> None:
     state, ctx, _ = awaiting_identity()
     state, ctx, _ = handle(state, ctx, CancelSession(1))
     assert state == KioskState.IDLE
-    assert ctx.uid is ctx.student_number is ctx.pending_op is None
+    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
     assert ctx.session_id == 1
     assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
     state, ctx, _ = handle(state, ctx, CardRead(2, "0002ABCD", "000000001"))
@@ -278,7 +284,7 @@ def test_interrupted_write_holds_until_authoritative_outcome(op: BackendOp, even
     state, ctx, effects = handle(state, ctx, event)
     assert state == KioskState.OUTCOME_UNKNOWN
     assert ctx.pending_op == op
-    assert ctx.uid is ctx.student_number is ctx.outcome is None
+    assert ctx.uid is ctx.confirmed_student_number is ctx.outcome is None
     assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
     assert handle(state, ctx, CardRead(2, UID, "000000001")) == (state, ctx, [])
     # Health recovery alone cannot resolve an outstanding write.
@@ -301,7 +307,7 @@ def test_backend_failure_distinguishes_not_sent_from_unknown(
     state, ctx, _ = waiting_for(op)
     state, ctx, _ = handle(state, ctx, BackendError(1, op, kind))
     assert not ctx.backend_online
-    assert ctx.uid is ctx.student_number is ctx.outcome is None
+    assert ctx.uid is ctx.confirmed_student_number is ctx.outcome is None
     if kind == FailureKind.NOT_SENT:
         assert state == KioskState.OFFLINE
         assert ctx.pending_op is None

@@ -1,8 +1,8 @@
 # Kiosk display content
 
-**Implementation update, 2026-10-10:** Both dummy displays now render state/outcome messages, public guidance, and connection failures. Success/assistance, QR, and retry result durations are 10, 30, and 6 seconds respectively, owned by the controller. The minimum-display-time proposal below is deferred: the prototype simulates a 2.5-second activation response and keeps registration fast. It publishes results immediately. Training/machine details remain unavailable and QR destinations remain non-scannable placeholders. The remaining text records the original content proposal; its unimplemented presentation-delay and data-model proposals are not current behavior.
+**Implementation update, 2026-10-13:** Both dummy displays render state/outcome messages, public guidance, and connection failures. They show readiness only after reader cleanup and rearming. Success/assistance, QR, and retry result durations are 10, 30, and 6 seconds respectively, owned by the controller. The minimum-display-time proposal below is deferred: the prototype simulates a 2.5-second activation response and keeps registration fast. It publishes results immediately. Training/machine details remain unavailable and QR destinations remain non-scannable placeholders.
 
-Draft for discussion with Shane, 2026-10-08. This defines content and behavior, not an implemented UI. Confirmed: QR screens last 30 seconds; success screens last 10 seconds; neither display shows student identifiers; display 1 shows the student's training level and accessible machines; display 2 includes general makerspace instructions and conduct guidance. Exact copy, other durations, training labels, URLs, and support details remain proposals.
+The content proposal began on 2026-10-08. Production copy, training labels, URLs, help details, and non-success result durations still need final review. The training and machine-access sections below describe the intended backend-backed display; the current UI labels those details unavailable.
 
 ## Display roles
 
@@ -17,10 +17,14 @@ Neither display shows student identifiers: no name, student number (including ma
 |---|---|---|---|
 | Starting up | Starting kiosk | Please wait while the kiosk gets ready. | Startup checks finish. This is a presentation distinction from a confirmed outage. |
 | Ready / collecting identifiers (`IDLE`, acquisition available or in progress) | Activate your makerspace visit | Hold your student card over the readers until this screen says you can remove it. | Both identifiers arrive, collection expires, or a reader fault occurs. No separate reading-card screen. |
-| `ACTIVATING` / minimum checking display time | Checking your access | Card read. You can remove your card now. | Normal result after the minimum checking display time; errors and timeouts interrupt immediately. |
+| `ACTIVATING` | Checking your access | Card read. You can remove your card now. | Backend response, error, or timeout. |
 | `AWAITING_IDENTITY` | Checking your card details | You can remove your card. Please wait. | Verified identity, timeout, cancellation, or error. Both raw values have already been collected; this is not a request for another tap. |
 | `REGISTERING` | Setting up your card | You can remove your card. Please wait. | Backend result, error, or session timeout. Registration versus replacement is not yet known. |
-| Rearming / reader cleanup | Getting ready for the next card | Please wait before presenting another card. | Cleanup is complete, both systems are ready, and no backend outcome is unresolved. |
+| `REARMING` (display only) / reader cleanup | Getting ready for the next card | Please wait before presenting another card. | Cleanup is complete, both systems are ready, and no backend outcome is unresolved. |
+
+### Deferred proposal: minimum checking display time
+
+The following presentation delay is not implemented. Current behavior is described in the implementation update above.
 
 After both identifiers arrive, send the backend request immediately and show “Checking your access” for a minimum of **2.5 seconds** (the chosen value within Shane's agreed 2–3 seconds). If the response takes longer, show the result as soon as it arrives; do not add another 2.5 seconds. This is a presentation delay, not a delay before sending the request or processing its response.
 
@@ -32,7 +36,7 @@ The current hardware path never emits `IdentityConfirmed`; therefore the eventua
 
 ## Display 1: result messages
 
-`RESULT` alone does not identify the screen; use its outcome. QR durations are confirmed at 30 seconds and success durations at 10 seconds to allow time to read the training and machine list. Other durations below remain proposals. The current two-second application timer has not been changed.
+`RESULT` alone does not identify the screen; use its outcome. The table gives the implemented durations: QR screens use 30 seconds, success/assistance screens 10 seconds, and retries 6 seconds. Production review of failure/retry timings remains open.
 
 | Outcome | Heading | Supporting text / action | Duration |
 |---|---|---|---|
@@ -111,7 +115,7 @@ A small, persistent availability area changes with the interaction while the gen
 |---|---|
 | Startup | Starting up — please wait |
 | Ready / brief identifier collection before a complete pair | Ready for the next student |
-| Processing (including the minimum checking display time), showing any result, or cleaning up | In use — please wait |
+| Processing, showing any result, or cleaning up | In use — please wait |
 | Offline or reader fault | Kiosk temporarily unavailable |
 | Outcome unknown | Kiosk temporarily unavailable |
 
@@ -125,18 +129,16 @@ Display 2 never announces the current student's training level or machine access
 - Show no student identifiers. Clear display 1's training and machine-access summary when its result ends or is interrupted. Display 2 receives only general guidance and public status.
 - Label a simulated build visibly as **Demo — no real access changes**. The current backend cannot grant an actual visit.
 
-## Implementation gaps to address after content is agreed
+## Display data and remaining work
 
-1. The core remains `IDLE` while waiting for a card and collecting identifiers. Keep the ready screen through that brief collection; no reader-progress notification or separate reading-card state is needed for the display. Actual scan admission and cleanup still determine when to show ready versus rearming; `state == IDLE` alone is insufficient. There is no physical presence detector.
-2. The current controller prints its progress but does not publish a display model. A frontend needs approved display data, not the entire context or terminal output.
-3. Every current result uses the same two-second timeout. Implement the 2.5-second minimum checking display time and agreed outcome-specific result durations under controller ownership. Coordinate result presentation, expiry, and rearming so the checking interval does not consume result time, browser refreshes do not restart timers, and cancelled or superseded results never reappear. Do not block the event loop or defer processing backend responses to create the display delay.
-4. The current result data does not supply the training level and machine list required by this draft. Agree backend-owned summary fields and their result-only lifetime; clear them on expiry or interruption without retaining student identifiers for display.
-5. Backend payloads, QR destinations, support contact, and same-card confirmation remain unresolved. This screen specification does not create those capabilities.
+The controller publishes state, outcome, and actual readiness after cleanup/rearming. The core remains `IDLE` through brief identifier collection; when it is idle but acquisition is unavailable, the student display uses `REARMING` and the public display stays “In use.” This adds no core state or physical presence detector.
+
+`/api/display/1` returns `state` and nullable `outcome`; `/api/display/2` returns only `status`. No positional label arrays, student identifiers, or raw backend reasons are sent. Browser refreshes do not restart controller timers.
+
+Remaining integration work is the backend-owned training/machine summary, approved QR destinations, support contact, and same-card confirmation. Clear any future summary fields on expiry or interruption. The minimum checking display delay remains deferred.
 
 ## Decisions awaiting Shane
 
 - Confirm the remaining failure/retry result durations.
 - Agree the training-level labels and machine-list content with the backend team.
 - Review exact makerspace guidance and contact/support wording with the makerspace team.
-
-No application code or timers have been changed for this draft.

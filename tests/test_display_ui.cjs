@@ -38,6 +38,7 @@ function display(number = "1") {
 const stateHeadings = {
   STARTING: "Starting kiosk",
   IDLE: "Activate your makerspace visit",
+  REARMING: "Getting ready for the next card",
   ACTIVATING: "Checking your access",
   AWAITING_IDENTITY: "Checking your card details",
   REGISTERING: "Setting up your card",
@@ -48,9 +49,9 @@ const stateHeadings = {
 
 test("every controller state has student instructions and clears result details", () => {
   const { context, nodes } = display();
-  for (const [screen, heading] of Object.entries(stateHeadings)) {
-    context.renderPayload({ screen: "RESULT", labels: ["ACTIVATED"] });
-    context.renderPayload({ screen, labels: [] });
+  for (const [state, heading] of Object.entries(stateHeadings)) {
+    context.renderPayload({ state: "RESULT", outcome: "ACTIVATED" });
+    context.renderPayload({ state, outcome: null });
     assert.equal(nodes.screen.textContent, heading);
     assert.equal(nodes["access-details"].hidden, true);
     assert.equal(nodes["qr-panel"].hidden, true);
@@ -74,7 +75,7 @@ const results = [
 test("all final outcomes render, with training only on success and honest QR placeholders", () => {
   const { context, nodes } = display();
   for (const [outcome, heading, success, qr] of results) {
-    context.renderPayload({ screen: "RESULT", labels: [outcome] });
+    context.renderPayload({ state: "RESULT", outcome });
     assert.equal(nodes.screen.textContent, heading);
     assert.equal(nodes["access-details"].hidden, !success);
     assert.equal(nodes["qr-panel"].hidden, !qr);
@@ -88,18 +89,18 @@ test("all final outcomes render, with training only on success and honest QR pla
 
 test("unknown or malformed payloads clear success without showing raw data", () => {
   const { context, nodes } = display();
-  for (const data of [null, {}, { screen: "IDLE", labels: "secret" },
-    { screen: "RESULT", labels: [null] }, { screen: "RESULT", labels: [["ACTIVATED"]] },
-    { screen: "RESULT", labels: ["UNREGISTERED"] }, { screen: "RESULT", labels: ["constructor"] },
-    { screen: "<script>secret</script>", labels: [] }]) {
-    context.renderPayload({ screen: "RESULT", labels: ["ACTIVATED"] });
+  for (const data of [null, {}, [], "IDLE", { state: "IDLE" },
+    { state: "RESULT", outcome: null }, { state: "RESULT", outcome: ["ACTIVATED"] },
+    { state: "RESULT", outcome: "UNREGISTERED" }, { state: "RESULT", outcome: "constructor" },
+    { state: "<script>secret</script>", outcome: null }, { state: ["IDLE"], outcome: null }]) {
+    context.renderPayload({ state: "RESULT", outcome: "ACTIVATED" });
     context.renderPayload(data);
     assert.equal(nodes.screen.textContent, "Display information unavailable");
     assert.equal(nodes["access-details"].hidden, true);
   }
 });
 
-test("public display only renders availability, ignoring private labels", () => {
+test("public display only renders availability, ignoring private fields", () => {
   const { context, nodes } = display("2");
   for (const [status, heading] of [
     ["STARTING", "Starting up — please wait"],
@@ -107,19 +108,22 @@ test("public display only renders availability, ignoring private labels", () => 
     ["IN USE", "In use — please wait"],
     ["UNAVAILABLE", "Kiosk temporarily unavailable"],
   ]) {
-    context.renderPayload({ screen: "GENERAL INSTRUCTIONS", labels: [status, "secret student data"] });
+    context.renderPayload({ status, outcome: "secret student data" });
     assert.equal(nodes["public-status"].textContent, heading);
     assert.equal(nodes["student-view"].hidden, true);
     assert.equal(nodes["general-view"].hidden, false);
     assert.ok(!Object.values(nodes).some((node) => node.textContent.includes("secret")));
   }
-  context.renderPayload({ screen: "RESULT", labels: ["ACTIVATED"] });
-  assert.equal(nodes["public-status"].textContent, "Display information unavailable");
+  for (const data of [null, {}, { status: ["WAITING"] }, { status: "constructor" },
+    { status: "secret student data" }, { state: "RESULT", outcome: "ACTIVATED" }]) {
+    context.renderPayload(data);
+    assert.equal(nodes["public-status"].textContent, "Display information unavailable");
+  }
 });
 
 test("unchanged polling does not rewrite live regions or schedule result transitions", () => {
   const ui = display();
-  const payload = { screen: "RESULT", labels: ["ACTIVATED"] };
+  const payload = { state: "RESULT", outcome: "ACTIVATED" };
   ui.context.renderPayload(payload);
   const writes = ui.writes();
   ui.context.renderPayload(payload);
@@ -136,8 +140,8 @@ test("network, HTTP and JSON errors clear old results; polling recovers on both 
     assert.equal(requests[0].options.cache, "no-store");
     assert.ok(requests[0].options.signal instanceof AbortSignal);
     const good = number === "1"
-      ? { screen: "RESULT", labels: ["ACTIVATED"] }
-      : { screen: "GENERAL INSTRUCTIONS", labels: ["WAITING"] };
+      ? { state: "RESULT", outcome: "ACTIVATED" }
+      : { status: "WAITING" };
     for (const fail of [
       async () => { throw new Error("network down"); },
       async () => ({ ok: false, status: 503 }),

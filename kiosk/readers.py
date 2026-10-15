@@ -3,7 +3,6 @@ reader, which is a USB smart card reader. The PN532 is used to get the UID of th
 OMNIKEY is used to read the student number from the card."""
 
 import asyncio
-from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 
 INTER_KEY_TIMEOUT = 2.0  # Seconds; tune against the physical reader if needed.
@@ -28,30 +27,17 @@ class _StudentNumberParser:
         return None
 
 
-def student_numbers(events: Iterable[tuple[float, str]]) -> Iterator[str]:
-    parser = _StudentNumberParser()
-    for timestamp, character in events:
-        number = parser.feed(timestamp, character)
-        if number is not None:
-            yield number
-
-
 def _character(event) -> str | None:
     from evdev import ecodes
 
+    if event.type == ecodes.EV_SYN and event.code == ecodes.SYN_DROPPED:
+        raise OSError("OMNIKEY input was lost; restart the reader before scanning again")
     if event.type != ecodes.EV_KEY or event.value != 1:
         return None
     if event.code == ecodes.KEY_ENTER:
         return "\n"
     digits = {getattr(ecodes, f"KEY_{digit}"): str(digit) for digit in range(10)}
     return digits.get(event.code, "?")
-
-
-def read_characters(device) -> Iterator[tuple[float, str]]:
-    for event in device.read_loop():
-        character = _character(event)
-        if character is not None:
-            yield event.timestamp(), character
 
 
 async def read_student_number_async(device, *, timeout: float = 10.0) -> str | None:

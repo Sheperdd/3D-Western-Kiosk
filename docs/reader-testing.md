@@ -13,6 +13,8 @@ The reported experiment used a Raspberry Pi 4, Raspberry Pi OS/Debian trixie, Py
 
 The reported PN532 setup used SPI switches **1 OFF, 2 ON**, 3.3 V, ground, MOSI/MISO/SCLK, and **software chip select GPIO5 (physical pin 29), not CE0**. Firmware 1.6 was reported. The wiring below follows that arrangement.
 
+Create and activate the virtual environment using the [README setup](../README.md#development), then run `python -m pip install -e ".[hardware]"` on the Pi before using the Python readers. The desktop-only installation does not include the Linux input or GPIO libraries.
+
 ## Wiring the NFC module to the Pi
 
 These instructions are for the **Elechouse NFC Module V3 / PN532 and Raspberry Pi 4's 40-pin header**. Check the module's printed labels rather than assuming connector order from another PN532 board.
@@ -85,9 +87,9 @@ The OMNIKEY remains powered; the script does not switch its RF field. This seque
 
 The reported helper uses PN532 `RFConfiguration` (`0x32`), item `0x01`, with `0x03` for on and `0x02` for off, retaining external-field checking. Alternatives `0x01`/`0x00` were discussed but not confirmed as the working configuration. Preserve the current script's evidence rather than assuming a different setting fixes RF interaction.
 
-Log timestamps for field commands, acknowledgements, UID reads, and completed student-number scans. Discard stale OMNIKEY input before waiting for a fresh scan, while recording that a discard occurred. The exact production buffering and fresh-presentation rules remain to be designed.
+For hardware trials, record timestamps for field commands, acknowledgements, UID reads, and completed student-number scans. Both current Python entry points discard queued OMNIKEY input before each UID attempt and preserve input arriving during RF-off. Same-card assurance remains unresolved.
 
-A three-second diagnostic pause is not a card-removal detector or an agreed production timeout. A successful sequence or short time gap also does not prove that both identifiers came from the same card.
+The probe's two-second pause between attempts assumes card removal. A pause or successful sequence does not prove that both identifiers came from the same card.
 
 ## 4. Trials to run
 
@@ -102,24 +104,26 @@ A three-second diagnostic pause is not a card-removal detector or an agreed prod
 
 Keep a small record of reader models, SPI wiring/switches, software versions, card aliases (A/B/C), attempts, missed/duplicate reads, RF acknowledgements/failures, and observed timing. Redact student numbers and UIDs from shared output while preserving key structure. The one-card trial establishes feasibility, not multi-card reliability or same-card assurance.
 
-## 5. Before connecting the readers to the controller
+## 5. Run the shared diagnostics
 
-Use the current combined Pi diagnostic as the starting point, separate from the student-card state machine. It reads PN532 UID bytes through SPI and OMNIKEY characters through Linux input events, following the RF handover above. Keep repeated scans visible during diagnosis. Preserve any newer Pi changes before updating the diagnostic.
+From the repository root, run `python -u -m tools.student_number_probe /dev/input/eventX` for reader-only trials. It uses the shared `read_card_async` operation, prints unverified identifiers, waits up to ten seconds for the student number after UID capture, and pauses two seconds between attempts. It makes no backend calls. Preserve any newer, separate Pi experiments before updating them.
 
-The integrated diagnostic runs with `python -u -m kiosk --device /dev/input/eventX`. It discards queued OMNIKEY input before each UID attempt, preserves input arriving during RF-off, and emits `CardRead` only after UID/RF acknowledgement and a complete student number. Missing the number produces retry feedback and no backend call. The backend remains simulated. After feedback expires, acquisition rearms automatically once reader cleanup finishes and the controller is ready. Card removal is assumed, as requested; there is no presence detector or guarantee against repeated processing of a held card. Test this path independently of the probe, whose post-handover drain and repeat delay are experimental.
+The integrated diagnostic runs with `python -u -m kiosk --device /dev/input/eventX`. It uses the same acquisition path and emits `CardRead` only after UID/RF acknowledgement and a complete student number. Missing the number produces retry feedback and no backend call. The backend remains simulated. After feedback expires, acquisition rearms automatically once reader cleanup finishes and the controller is ready; the displays wait for that readiness too. Card removal is assumed, as requested; there is no presence detector or guarantee against repeated processing of a held card.
+
+If Linux reports lost input (`SYN_DROPPED`) during collection, the probe exits with a reader error and the kiosk enters `READER_ERROR`, with no backend request for that attempt. Remove the card and restart the process to reopen the devices before retrying. Automatic fault recovery remains unimplemented.
 
 For the repeated-scan Pi trial:
 
 **2026-10-07 observation:** an integrated run repeatedly returned no UID after five-second waits while RF-on/off commands were acknowledged. OMNIKEY input events were buffered during some attempts. Shutdown waited for the active UID read and completed cleanly. Shane subsequently reported that the original reader arrangement worked again; interaction between the readers is suspected but not confirmed. No reader/RF behavior was changed to resolve this incident. The temporary reader trace was removed after this investigation; reliability remains unproven.
 
 1. Present card A, hold it through the student-number beep, verify both prints, then take it back.
-2. Wait for the result to return to `IDLE` and print `Ready for next card.` (normally about 2 seconds after the result).
+2. Wait for `Ready for next card.` and the displays' ready messages. Use the current [result durations](display-spec.md#display-1-result-messages); cleanup must also finish before readiness returns.
 3. Present card A again without restarting. Expect one new completed pair and one simulated activation.
 4. Take A back, wait for readiness, then present card B. Verify B's printed student number and UID; neither value may be carried over from A.
 5. If a scan misses the student number, wait for incomplete-scan feedback and readiness, then retry without restarting. The incomplete attempt must not print `ActivateUid`.
 6. Repeat several alternating-card cycles, then Ctrl+C while waiting for a card to check shutdown. Record any stale values, unexpected errors, or failure to rearm. Do not treat a held-card repeat as a removal-detection failure; removal is outside this version's behavior.
 
-Before production integration, establish same-card assurance, fresh-presentation detection, and recovery from RF command failure. `IdentityConfirmed` must represent verified same-card evidence, not two values grouped by timing or session ID. Raw `CardRead` values never establish a trusted association. Cancellation must finish reader cleanup before devices close; device/command failures must produce `ReaderFault`.
+Before production integration, establish same-card assurance and recovery from reader faults. Card removal remains assumed under the current scope. `IdentityConfirmed` must represent verified same-card evidence, not two values grouped by timing or session ID. Raw `CardRead` values never establish a trusted association. Cancellation must finish reader cleanup before devices close; device/command failures must produce `ReaderFault`.
 
 These diagnostics must not register cards, replace cards, or activate visits. Reader evidence is separate from backend acceptance. The plan does not establish that the OMNIKEY can also supply a matching UID or that student numbers can be mathematically converted to UIDs.
 

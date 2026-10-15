@@ -175,7 +175,7 @@ def test_unregistered_hardware_session_expires_without_confirming_raw_number(
         try:
             context = await asyncio.wait_for(reach(KioskState.AWAITING_IDENTITY), 1)
             assert context.observed_student_number == "000123456"
-            assert context.student_number is None
+            assert context.confirmed_student_number is None
             queue.put_nowait(Timeout(1, TimeoutName.SESSION))
             context = await asyncio.wait_for(reach(KioskState.RESULT), 1)
             assert context.outcome == Outcome.SESSION_EXPIRED
@@ -509,6 +509,7 @@ def test_rearm_waits_for_cancelled_reader_cleanup_without_another_event(
         second_started = asyncio.Event()
         blocker = asyncio.Event()
         events = []
+        displays = []
         reads = 0
         original_handle = controller.handle
 
@@ -518,6 +519,9 @@ def test_rearm_waits_for_cancelled_reader_cleanup_without_another_event(
             if cleanup_started.is_set() and result[0] == KioskState.IDLE:
                 recovered.set()
             return result
+
+        def display(state, outcome, ready_for_card):
+            displays.append((state, ready_for_card))
 
         async def read_card(reader, student_reader, *, student_timeout):
             nonlocal reads
@@ -539,7 +543,13 @@ def test_rearm_waits_for_cancelled_reader_cleanup_without_another_event(
         queue.put_nowait(BackendOnline())
         queue.put_nowait(ReaderReady(0))
         runner = asyncio.create_task(
-            controller.run(queue, hardware_mode=True, uid_reader=object(), student_reader=object())
+            controller.run(
+                queue,
+                hardware_mode=True,
+                uid_reader=object(),
+                student_reader=object(),
+                on_state_change=display,
+            )
         )
         try:
             await asyncio.wait_for(first_started.wait(), 1)
@@ -550,9 +560,11 @@ def test_rearm_waits_for_cancelled_reader_cleanup_without_another_event(
             await asyncio.wait_for(recovered.wait(), 1)
             assert reads == 1
             assert not second_started.is_set()
+            assert displays[-1] == (KioskState.IDLE, False)
             release_cleanup.set()  # No further event is needed to wake the controller.
             await asyncio.wait_for(second_started.wait(), 1)
             assert reads == 2
+            assert displays[-1] == (KioskState.IDLE, True)
             assert not any(isinstance(event, (CardRead, BackendResult)) for event in events)
         finally:
             release_cleanup.set()
@@ -854,6 +866,50 @@ def test_backend_dispatch_tracks_and_releases_tasks(
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("hardware_mode", [False, True])
+@pytest.mark.parametrize("registration", [False, True])
+def test_default_backend_success_does_not_depend_on_readers(
+    monkeypatch: pytest.MonkeyPatch, hardware_mode: bool, registration: bool
+) -> None:
+    async def check() -> None:
+        queue: asyncio.Queue[Event] = asyncio.Queue()
+        results = asyncio.Queue()
+        original_activation = controller.fake_activate_uid
+
+        async def unregistered(queue, effect, seconds, desired_outcome):
+            await original_activation(queue, effect, seconds, Outcome.UNREGISTERED)
+
+        def observe(state, outcome, ready_for_card):
+            if state == KioskState.RESULT:
+                results.put_nowait(outcome)
+
+        monkeypatch.setattr(controller, "DEMO_ACTIVATION_DELAY", 0)
+        monkeypatch.setattr(controller, "DEMO_REGISTRATION_DELAY", 0)
+        if registration:
+            monkeypatch.setattr(controller, "fake_activate_uid", unregistered)
+        for event in [BackendOnline(), ReaderReady(0), CardRead(1, "0001ABCD", "000000001")]:
+            queue.put_nowait(event)
+        if registration:
+            queue.put_nowait(IdentityConfirmed(1, "0001ABCD", "000000001"))
+        runner = asyncio.create_task(
+            controller.run(
+                queue,
+                hardware_mode=hardware_mode,
+                uid_reader=object(),
+                student_reader=object(),
+                on_state_change=observe,
+            )
+        )
+        try:
+            outcome = await asyncio.wait_for(results.get(), 1)
+            assert outcome == (Outcome.REGISTERED_AND_ACTIVE if registration else Outcome.ACTIVATED)
+        finally:
+            runner.cancel()
+            await asyncio.gather(runner, return_exceptions=True)
+
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize(
     ("activation", "identity", "failure", "expected_state", "expected_outcome"),
     [
@@ -877,7 +933,7 @@ def test_controller_flow(
         original_activation = controller.fake_activate_uid
         registration_calls = []
 
-        def observe(state, outcome):
+        def observe(state, outcome, ready_for_card):
             observed.put_nowait((state, outcome))
 
         async def activate(queue, effect, seconds, desired_outcome):
@@ -1014,7 +1070,6 @@ def test_shutdown_awaits_removed_timer_cleanup(
             timers,
             background_tasks,
             *,
-            hardware_mode: bool = False,
             outcome: Outcome | None = None,
         ):
             nonlocal captured_timers, captured_tasks
@@ -1025,7 +1080,6 @@ def test_shutdown_awaits_removed_timer_cleanup(
                 effect,
                 timers,
                 background_tasks,
-                hardware_mode=hardware_mode,
                 outcome=outcome,
             )
 
@@ -1114,7 +1168,7 @@ def test_late_backend_response_resolves_hold_without_showing_success(
         states: list[KioskState] = []
         original_activation = controller.fake_activate_uid
 
-        def observe(state, outcome):
+        def observe(state, outcome, ready_for_card):
             states.append(state)
             if state == KioskState.OUTCOME_UNKNOWN:
                 holding.set()

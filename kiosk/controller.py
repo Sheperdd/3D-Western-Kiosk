@@ -76,7 +76,7 @@ async def fake_register_and_activate(
         )
 
 
-# Laptop demo settings; production durations still need agreement.
+# Simulated backend settings for both reader modes; production durations need agreement.
 DEMO_TIMEOUT_SECONDS: dict[TimeoutName, float] = {
     TimeoutName.SESSION: 10.0,
 }
@@ -105,7 +105,6 @@ def dispatch(
     timers: dict[tuple[int, TimeoutName], asyncio.Task[None]],
     background_tasks: set[asyncio.Task[None]],
     *,
-    hardware_mode: bool = False,
     outcome: Outcome | None = None,
 ) -> None:
     if isinstance(effect, StartTimeout):
@@ -128,23 +127,15 @@ def dispatch(
             del timers[(effect.session_id, effect.name)]
 
     elif isinstance(effect, ActivateUid):
-        # In demo mode, we simulate a backend response after a delay. Change the outcome
-        # after the else to simulate different backend responses.
-        outcome = Outcome.ACTIVATED if hardware_mode else Outcome.UNREGISTERED
         backend_task = asyncio.create_task(
-            fake_activate_uid(queue, effect, DEMO_ACTIVATION_DELAY, outcome)
+            fake_activate_uid(queue, effect, DEMO_ACTIVATION_DELAY, Outcome.ACTIVATED)
         )
         background_tasks.add(backend_task)
         backend_task.add_done_callback(background_tasks.discard)
 
     elif isinstance(effect, RegisterAndActivate):
         backend_task = asyncio.create_task(
-            fake_register_and_activate(
-                queue,
-                effect,
-                DEMO_REGISTRATION_DELAY,
-                failure=None if hardware_mode else FailureKind.UNKNOWN,
-            )
+            fake_register_and_activate(queue, effect, DEMO_REGISTRATION_DELAY)
         )
         background_tasks.add(backend_task)
         backend_task.add_done_callback(background_tasks.discard)
@@ -158,7 +149,7 @@ async def run(
     hardware_mode: bool = False,
     uid_reader=None,
     student_reader=None,
-    on_state_change: Callable[[KioskState, Outcome | None], None] | None = None,
+    on_state_change: Callable[[KioskState, Outcome | None, bool], None] | None = None,
 ) -> None:
     if hardware_mode and (uid_reader is None or student_reader is None):
         raise ValueError("Hardware mode requires both uid_reader and student_reader")
@@ -203,7 +194,7 @@ async def run(
 
     try:
         if on_state_change is not None:
-            on_state_change(state, context.outcome)
+            on_state_change(state, context.outcome, False)
 
         while True:
             if next_event is None:
@@ -231,10 +222,6 @@ async def run(
 
                     state, context, effects = handle(state, context, event)
 
-                    # If the state has changed, call to change the display
-                    if on_state_change is not None:
-                        on_state_change(state, context.outcome)
-
                     print("State: ", state.name, "Outcome: ", context.outcome)
                     for effect in effects:
                         dispatch(
@@ -242,9 +229,9 @@ async def run(
                             effect,
                             timers,
                             background_tasks,
-                            hardware_mode=hardware_mode,
                             outcome=context.outcome,
                         )
+            ready_for_card = state == KioskState.IDLE
             if hardware_mode:
                 ready = (
                     state == KioskState.IDLE
@@ -260,12 +247,15 @@ async def run(
                     elif admission_revoked and acquisition_task.cancelling() == 0:
                         acquisition_task.cancel()
                 if ready and acquisition_task is None and acquired_scan is None and queue.empty():
-                    # ponytail: assume card removal during result feedback; add detection if needed.
+                    # shortcut: assume card removal during feedback; add detection if required.
                     admission_revoked = False
                     print("Ready for next card.")
                     acquisition_task = asyncio.create_task(acquire_card())
                     background_tasks.add(acquisition_task)
                     acquisition_task.add_done_callback(background_tasks.discard)
+                ready_for_card = ready and acquisition_task is not None and not admission_revoked
+            if on_state_change is not None:
+                on_state_change(state, context.outcome, ready_for_card)
     finally:
         admission_revoked = True
         background_snapshot = list(background_tasks)

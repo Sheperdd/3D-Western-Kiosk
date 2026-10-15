@@ -13,15 +13,15 @@ A student-card registration and daily tool-access kiosk for 3D-Western. Students
 
 No account means an account-signup QR and a rescan after signup. Missing induction means a training-signup QR, with no registration or activation. Backend unavailability prevents registration and activation; success requires backend confirmation.
 
-One-presentation registration has been tested on one card. Broader reliability and safe pairing of the two reader outputs remain validation tasks.
+One-presentation identifier collection has been tested on one card. Real registration, broader reliability, and safe pairing of the two reader outputs remain validation tasks.
 
 ## Responsibilities and hardware
 
 The kiosk handles student interaction and calls the agreed backend interface. The backend/tool team owns accounts, training, eligibility, persistent associations, visit records, daily expiry, and tool enforcement. Entrance-door control is outside scope.
 
-The current hardware plan retains a Raspberry Pi 4 (4 GB or more), the OMNIKEY 5427, a UID reader, and two output-only displays: display 1 guides the current student's registration or activation; display 2 shows general instructions and system status without student-specific information. See the [buylist](docs/buylist.txt) for planning details. The retained architecture direction is a Python core with a Chromium web UI; it is not all implemented.
+The current hardware plan retains a Raspberry Pi 4 (4 GB or more), the OMNIKEY 5427, a PN532 UID reader, and two output-only displays: display 1 guides the current student's registration or activation; display 2 shows general instructions and system status without student-specific information. See the [reader setup and trials](docs/reader-testing.md). The Python core and local web UI are implemented; appliance deployment remains pending.
 
-V1 has no card dispensing, returns, motors, stock tracking, or non-return flags. Founder access is deferred for further requirements gathering. [ADR-0005](docs/adr/0005-student-card-registration-and-daily-activation.md) explains the change; the old [M1 roadmap](docs/m1-roadmap.md) is historical.
+V1 has no card dispensing, returns, motors, stock tracking, or non-return flags. Founder access is deferred for further requirements gathering. [ADR-0005](docs/adr/0005-student-card-registration-and-daily-activation.md) explains the change.
 
 ## Development
 
@@ -34,16 +34,23 @@ pip install -e .
 pip install --group dev
 ```
 
-Checks for implementation work:
+That installation supports the desktop demo. On the Raspberry Pi, also install the declared hardware dependencies in the activated environment before running either reader command:
 
 ```sh
-ruff format --check kiosk tests
-ruff check kiosk tests
-pyright
-pytest tests/test_machine.py tests/test_invariants.py
+python -m pip install -e ".[hardware]"
 ```
 
-Run checks in the activated virtual environment. If Pyright cannot locate its interpreter, pass `--pythonpath .venv/Scripts/python.exe` on Windows (or `.venv/bin/python` on the Pi).
+See the [reader guide](docs/reader-testing.md) for wiring, input-device identification, and permissions. Full implementation checks (JavaScript tests require Node.js 18 or newer):
+
+```sh
+ruff format --check kiosk tests tools
+ruff check kiosk tests tools
+pyright
+pytest
+node --test tests/test_display_ui.cjs
+```
+
+Run checks in the activated virtual environment. If Pyright cannot locate its interpreter, pass `--pythonpath .venv/Scripts/python.exe` on Windows (or `.venv/bin/python` on the Pi). The tests use fake devices and run on Windows. Full Pyright validation requires the hardware dependencies in a Linux/Pi environment; the desktop-only installation reports missing hardware imports, so it is not a clean full type check.
 
 The pure state machine uses `handle(state, context, event)` to return a new state, context, and effects without I/O. A complete `CardRead` starts backend activation; an unregistered UID proceeds to registration only with a separately confirmed identity pair. Raw observed numbers cannot authorize registration or replacement. Results and timers are scoped to the interaction. Lost write responses hold the machine in `OUTCOME_UNKNOWN`; reconnection alone does not release that hold.
 
@@ -56,14 +63,10 @@ Run `python -m kiosk` and open both pages on the kiosk computer:
 - Student display: <http://127.0.0.1:8000/?display=1>
 - Public guidance: <http://127.0.0.1:8000/?display=2>
 
-The desktop demo waits 10 seconds after starting the web server before sending one simulated card scan, leaving the ready screen visible during the pause. Keep the pages open and restart the process to replay it; refreshing a page does not restart the interaction. The displays poll every 250 ms and recover automatically after a connection failure. Python owns state transitions and result durations: success/assistance 10 seconds, signup/training 30 seconds, retry 6 seconds. Activation simulates 2.5 seconds of backend latency; there is no guaranteed minimum visible checking time.
+The desktop demo waits 10 seconds after starting the web server before sending one simulated card scan, leaving the ready screen visible during the pause. Both desktop and hardware demos default to successful simulated activation; choosing readers does not select a backend outcome. Registration and failure scenarios are exercised explicitly in the tests. Keep the pages open and restart the process to replay the desktop scan; refreshing a page does not restart the interaction. The displays poll every 250 ms and recover automatically after a connection failure. Python owns state transitions and result durations: success/assistance 10 seconds, signup/training 30 seconds, retry 6 seconds. Activation simulates 2.5 seconds of backend latency; there is no guaranteed minimum visible checking time.
 
 Every controller state and final outcome has student-facing copy. The public display only shows general guidance and availability. Neither displays student identifiers. Success screens show unavailable training/machine details until the backend supplies them. Signup and induction screens have clearly labelled, non-scannable placeholders until approved URLs are available. All screens are visibly marked as a demo.
 
-The UI uses plain HTML, CSS and JavaScript with no build step or external assets. Run its rendering and polling tests with Node.js 18 or newer:
-
-```sh
-node --test tests/test_display_ui.cjs
-```
+The UI uses plain HTML, CSS and JavaScript with no build step or external assets. During reader cleanup, display 1 says “Getting ready for the next card” and display 2 remains “In use.” The ready message appears when acquisition is available again. The local student API exposes `state` and `outcome`; the public API exposes only `status`.
 
 Review the wording and check readability on the actual kiosk monitors before deployment. The tests cover the core's decisions using synthetic events. They do not establish physical same-card assurance, backend persistence, replacement invalidation, midnight expiry, or tool enforcement. The internal event/effect names are provisional and do not specify network endpoints. See [plan section 7](docs/plan.md#7-core-migration-implemented-and-next-work) for controller obligations and integration work. Shane normally writes implementation with mentor support; this core migration and the dummy frontend were explicitly delegated.

@@ -1,19 +1,20 @@
 import asyncio
 import sys
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
 
 from kiosk import controller, readers
-from kiosk.events import BackendOnline, CardRead, KioskState, ReaderReady
-from kiosk.readers import student_numbers
+from kiosk.events import BackendOnline, CardRead, KioskState, ReaderFault, ReaderReady
+from tools import student_number_probe as probe
 
 
 @pytest.fixture
 def input_device(monkeypatch: pytest.MonkeyPatch):
     codes = {f"KEY_{digit}": 100 + digit for digit in range(10)}
-    ecodes = SimpleNamespace(EV_KEY=1, KEY_ENTER=28, **codes)
+    ecodes = SimpleNamespace(EV_KEY=1, EV_SYN=0, SYN_DROPPED=3, KEY_ENTER=28, **codes)
     monkeypatch.setitem(sys.modules, "evdev", SimpleNamespace(ecodes=ecodes))
 
     class InputDevice:
@@ -40,9 +41,6 @@ def input_device(monkeypatch: pytest.MonkeyPatch):
                     )
                 )
 
-        def read_loop(self):
-            return iter(self.events)
-
         def read_one(self):
             return self.events.pop(0) if self.events else None
 
@@ -64,8 +62,9 @@ def input_device(monkeypatch: pytest.MonkeyPatch):
     return InputDevice
 
 
+@pytest.mark.parametrize("input_lost", [False, True])
 def test_controller_first_scan_runs_real_threaded_reader_pipeline(
-    input_device, monkeypatch
+    input_device, monkeypatch, input_lost
 ) -> None:
     async def check() -> None:
         device = input_device()
@@ -80,7 +79,13 @@ def test_controller_first_scan_runs_real_threaded_reader_pipeline(
             def call_function(self, command, *, params, response_length):
                 commands.append(params)
                 if params == b"\x01\x02":
-                    device.feed("000123456\n")
+                    if input_lost:
+                        device.feed("0001")
+                        device.events.append(SimpleNamespace(type=0, code=3, value=0))
+                        device.events.append(SimpleNamespace(type=0, code=0, value=0))
+                        device.feed("56789\n", start=0.1)
+                    else:
+                        device.feed("000123456\n")
                 return b""
 
             def read_passive_target(self, *, timeout):
@@ -90,7 +95,8 @@ def test_controller_first_scan_runs_real_threaded_reader_pipeline(
             if isinstance(event, CardRead):
                 scans.append(event)
             result = original_handle(state, context, event)
-            if result[0] == KioskState.RESULT:
+            if result[0] == KioskState.RESULT or isinstance(event, ReaderFault):
+                assert result[0] == (KioskState.READER_ERROR if input_lost else KioskState.RESULT)
                 finished.set()
             return result
 
@@ -107,8 +113,9 @@ def test_controller_first_scan_runs_real_threaded_reader_pipeline(
         )
         try:
             await asyncio.wait_for(finished.wait(), 1)
-            assert scans == [CardRead(1, "0001ABCD", "000123456")]
+            assert scans == ([] if input_lost else [CardRead(1, "0001ABCD", "000123456")])
             assert commands == [b"\x01\x03", b"\x01\x02"]
+            assert device.removed == [device.fileno()]
         finally:
             runner.cancel()
             await asyncio.gather(runner, return_exceptions=True)
@@ -116,8 +123,61 @@ def test_controller_first_scan_runs_real_threaded_reader_pipeline(
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("scan", ["000123456\n", ""])
+def test_probe_preserves_handover_input_and_times_out_incomplete_scans(
+    input_device, monkeypatch, capsys, scan
+) -> None:
+    async def check() -> None:
+        device = input_device()
+        device.feed("000999999\n")
+        closed = []
+        original_sleep = asyncio.sleep
+
+        class UidReader:
+            def call_function(self, command, *, params, response_length):
+                if params == b"\x01\x03":
+                    assert not device.events
+                else:
+                    device.feed(scan)
+                return b""
+
+            def read_passive_target(self, *, timeout):
+                return bytes.fromhex("0001ABCD")
+
+        @contextmanager
+        def open_readers(path):
+            assert path == "test-device"
+            try:
+                yield UidReader(), device
+            finally:
+                closed.append(True)
+
+        async def read_card(uid_reader, student_reader):
+            return await readers.read_card_async(uid_reader, student_reader, student_timeout=0.01)
+
+        async def stop_after_attempt(seconds):
+            if seconds == 2:
+                raise asyncio.CancelledError
+            await original_sleep(seconds)
+
+        monkeypatch.setattr(sys, "argv", ["probe", "test-device"])
+        monkeypatch.setattr(probe, "open_readers", open_readers)
+        monkeypatch.setattr(probe, "read_card_async", read_card)
+        monkeypatch.setattr(probe.asyncio, "sleep", stop_after_attempt)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(probe.main(), 1)
+        assert closed == [True]
+        assert device.removed == [device.fileno()]
+
+    asyncio.run(check())
+    output = capsys.readouterr().out
+    assert "000999999" not in output
+    assert ("Student number received (unverified): 000123456" in output) == bool(scan)
+    assert ("Incomplete scan." in output) == (not scan)
+
+
 @pytest.mark.parametrize("prefix", ["", "1234567890\n", "123?56789\n", "12345\n", "12345"])
-def test_async_student_number_reuses_sync_parsing_and_key_filtering(input_device, prefix) -> None:
+def test_async_student_number_parses_complete_scans_and_filters_keys(input_device, prefix) -> None:
     async def check() -> None:
         device = input_device()
         device.events.extend(
@@ -127,7 +187,6 @@ def test_async_student_number_reuses_sync_parsing_and_key_filtering(input_device
         device.feed(prefix)
         device.feed("000123456\n", start=3.0)
         device.feed("000654321\n", start=4.0)
-        assert list(student_numbers(readers.read_characters(device))) == ["000123456", "000654321"]
         assert await readers.read_student_number_async(device) == "000123456"
         assert device.removed == [device.fileno()]
         assert len(device.events) == 10
@@ -288,21 +347,6 @@ def test_async_student_number_propagates_device_errors(input_device, failure) ->
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(check())
-
-
-@pytest.mark.parametrize(
-    ("scan", "expected"),
-    [
-        ("000123456\n", ["000123456"]),
-        ("1234567890\n", []),
-        ("1234567890\n000123456\n", ["000123456"]),
-    ],
-    ids=["leading-zeros", "overlong-scan", "valid-scan-after-rejection"],
-)
-def test_student_numbers_parses_complete_scans(scan: str, expected: list[str]) -> None:
-    events = ((index * 0.01, character) for index, character in enumerate(scan))
-
-    assert list(student_numbers(events)) == expected
 
 
 @pytest.mark.parametrize(

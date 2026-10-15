@@ -123,7 +123,12 @@ def test_transition_invariants(state: KioskState, ctx: Context, event: Event) ->
         KioskState.AWAITING_IDENTITY,
         KioskState.REGISTERING,
     }:
-        assert new_ctx.uid is new_ctx.observed_student_number is new_ctx.student_number is None
+        assert (
+            new_ctx.uid
+            is new_ctx.observed_student_number
+            is new_ctx.confirmed_student_number
+            is None
+        )
     if new_state == KioskState.IDLE:
         assert new_ctx.backend_online and new_ctx.reader_ready
         assert new_ctx.pending_op is None
@@ -147,13 +152,13 @@ def test_transition_invariants(state: KioskState, ctx: Context, event: Event) ->
             assert len(event.student_number) == 9
         if isinstance(effect, RegisterAndActivate):
             assert effect.uid == new_ctx.uid
-            assert effect.student_number == new_ctx.student_number
+            assert effect.student_number == new_ctx.confirmed_student_number
             assert (
                 isinstance(event, IdentityConfirmed) and state == KioskState.AWAITING_IDENTITY
             ) or (
                 isinstance(event, BackendResult)
                 and event.outcome == Outcome.UNREGISTERED
-                and ctx.student_number is not None
+                and ctx.confirmed_student_number is not None
             )
         # Replaying an accepted event cannot send the operation twice.
         _, _, repeated = handle(new_state, new_ctx, event)

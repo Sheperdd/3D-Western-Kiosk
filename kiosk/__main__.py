@@ -9,7 +9,6 @@ from kiosk.events import (
     BackendOnline,
     CardRead,
     Event,
-    IdentityConfirmed,
     KioskState,
     Outcome,
     ReaderReady,
@@ -22,23 +21,20 @@ async def main(device: str | None = None) -> None:
     app = create_app()
     display_data = app[DISPLAY_DATA]
 
-    def update_display(state: KioskState, outcome: Outcome | None) -> None:
+    def update_display(state: KioskState, outcome: Outcome | None, ready_for_card: bool) -> None:
         display_data[1] = {
-            "screen": state.name,
-            "labels": [outcome.name] if outcome is not None else [],
+            "state": "REARMING" if state == KioskState.IDLE and not ready_for_card else state.name,
+            "outcome": outcome.name if outcome is not None else None,
         }
 
-        if state == KioskState.IDLE:
+        if ready_for_card:
             public_status = "WAITING"
         elif state in (KioskState.OFFLINE, KioskState.READER_ERROR, KioskState.OUTCOME_UNKNOWN):
             public_status = "UNAVAILABLE"
         else:
             public_status = "IN USE"
 
-        display_data[2] = {
-            "screen": "GENERAL INSTRUCTIONS",
-            "labels": [public_status, "Makerspace guidance placeholder."],
-        }
+        display_data[2] = {"status": public_status}
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -52,7 +48,6 @@ async def main(device: str | None = None) -> None:
 
             def demo_scan() -> None:
                 queue.put_nowait(CardRead(1, "1234567890", "000123456"))
-                queue.put_nowait(IdentityConfirmed(1, "1234567890", "000123456"))
 
             scan_timer = asyncio.get_running_loop().call_later(10.0, demo_scan)
             try:
