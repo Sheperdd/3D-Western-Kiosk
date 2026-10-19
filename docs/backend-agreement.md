@@ -1,6 +1,8 @@
 # Student-card kiosk: ops backend agreement
 
-**Status:** draft for discussion with the Backend VP; not an approved network contract.  
+**Status, 2026-10-19:** Shane is taking over ops-backend. The current contract is [ops-api.md](ops-api.md). This document remains the background review of the ops checkout and its open risks.
+
+**Original status:** draft for discussion with the Backend VP; not an approved network contract.  
 **Prepared:** 2026-09-16.  
 **Meeting date / attendees:** to fill in.  
 **Kiosk lead:** Shane. **Backend and tool leads:** to confirm.
