@@ -4,7 +4,8 @@
 kiosk_browser() {
     while :; do
         until curl -sf http://127.0.0.1:8000/ > /dev/null; do sleep 1; done
-        chromium --ozone-platform=wayland --kiosk --no-first-run --noerrdialogs \
+        # No --kiosk: it requests fullscreen before rc.xml can move the window.
+        chromium --ozone-platform=wayland --no-first-run --noerrdialogs \
             --incognito --password-store=basic \
             --class="kiosk-d$1" --user-data-dir="$HOME/.cache/kiosk-d$1" \
             "http://127.0.0.1:8000/?display=$1"
