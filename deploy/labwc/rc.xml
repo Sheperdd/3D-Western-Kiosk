@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!-- Install: sudo -u kioskapp cp deploy/labwc/rc.xml /home/kioskapp/.config/labwc/ -->
+<!-- labwc runs with -m, so this merges with /etc/xdg/labwc/rc.xml. -->
+<labwc_config>
+  <windowRules>
+    <!-- Chromium requests fullscreen before the window maps, and MoveToOutput ignores
+         fullscreen windows: leave fullscreen, move, then re-enter it. -->
+    <windowRule identifier="kiosk-d1">
+      <action name="ToggleFullscreen"/>
+      <action name="MoveToOutput" output="HDMI-A-2"/>
+      <action name="ToggleFullscreen"/>
+    </windowRule>
+    <windowRule identifier="kiosk-d2">
+      <action name="ToggleFullscreen"/>
+      <action name="MoveToOutput" output="HDMI-A-1"/>
+      <action name="ToggleFullscreen"/>
+    </windowRule>
+  </windowRules>
+</labwc_config>

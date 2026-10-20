@@ -1,0 +1,16 @@
+# Install: sudo -u kioskapp cp deploy/labwc/autostart /home/kioskapp/.config/labwc/
+# labwc runs with -m, so this runs after /etc/xdg/labwc/autostart (kanshi, panel).
+# One loop per display: wait for the kiosk server, run Chromium, relaunch 5 s after it exits.
+kiosk_browser() {
+    while :; do
+        until curl -sf http://127.0.0.1:8000/ > /dev/null; do sleep 1; done
+        chromium --ozone-platform=wayland --kiosk --no-first-run --noerrdialogs \
+            --incognito --password-store=basic \
+            --class="kiosk-d$1" --user-data-dir="$HOME/.cache/kiosk-d$1" \
+            "http://127.0.0.1:8000/?display=$1"
+        sleep 5
+    done
+}
+
+kiosk_browser 1 &
+kiosk_browser 2 &
