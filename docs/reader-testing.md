@@ -106,11 +106,11 @@ Keep a small record of reader models, SPI wiring/switches, software versions, ca
 
 ## 5. Run the shared diagnostics
 
-From the repository root, run `python -u -m tools.student_number_probe /dev/input/eventX` for reader-only trials. It uses the shared `read_card_async` operation, prints unverified identifiers, waits up to ten seconds for the student number after UID capture, and pauses two seconds between attempts. It makes no backend calls. Preserve any newer, separate Pi experiments before updating them.
+On a deployed Pi, run `sudo systemctl stop kiosk` first; the service holds both readers (see the [README](../README.md#running-the-kiosk-and-diagnostics)). From the repository root, run `python -u -m tools.student_number_probe /dev/input/eventX` for reader-only trials. It uses the shared `read_card_async` operation, prints unverified identifiers, waits up to ten seconds for the student number after UID capture, and pauses two seconds between attempts. It makes no backend calls. Preserve any newer, separate Pi experiments before updating them.
 
 The integrated diagnostic runs with `python -u -m kiosk --device /dev/input/eventX`. It uses the same acquisition path and emits `CardRead` only after UID/RF acknowledgement and a complete student number. Missing the number produces retry feedback and no backend call. The backend remains simulated. After feedback expires, acquisition rearms automatically once reader cleanup finishes and the controller is ready; the displays wait for that readiness too. Card removal is assumed, as requested; there is no presence detector or guarantee against repeated processing of a held card.
 
-If Linux reports lost input (`SYN_DROPPED`) during collection, the probe exits with a reader error and the kiosk enters `READER_ERROR`, with no backend request for that attempt. Remove the card and restart the process to reopen the devices before retrying. Automatic fault recovery remains unimplemented.
+If Linux reports lost input (`SYN_DROPPED`) during collection, the probe exits with a reader error and the kiosk enters `READER_ERROR`, with no backend request for that attempt. In hardware mode the kiosk then exits once reader cleanup finishes; under `kiosk.service`, systemd restarts it five seconds later and the new process reopens both devices. A manual run must be restarted by hand.
 
 For the repeated-scan Pi trial:
 

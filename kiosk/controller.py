@@ -231,6 +231,14 @@ async def run(
                             background_tasks,
                             outcome=context.outcome,
                         )
+
+                    if (
+                        hardware_mode
+                        and isinstance(event, ReaderFault)
+                        and context.pending_op is None
+                    ):
+                        raise RuntimeError(f"Reader fault: {event.reason}")
+
             ready_for_card = state == KioskState.IDLE
             if hardware_mode:
                 ready = (

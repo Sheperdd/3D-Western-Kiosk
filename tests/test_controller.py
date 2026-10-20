@@ -245,7 +245,11 @@ def test_hardware_acquisition_waits_for_readiness_and_rearms_when_ready(
                 assert event == ReaderFault(0, "RF-off failed")
                 assert state == KioskState.READER_ERROR
                 assert context.session_id == 0
-                queue.put_nowait(ReaderReady(0))
+                # Hardware mode exits so systemd restarts it; there is no in-process rearm.
+                with pytest.raises(RuntimeError, match="Reader fault: RF-off failed"):
+                    await asyncio.wait_for(runner, 1)
+                assert calls == [reader]
+                return
             else:
                 assert event == CardRead(1, "0001ABCD", "000000001")
                 assert state == KioskState.ACTIVATING
@@ -386,17 +390,19 @@ def test_hardware_acquisition_cancellation_drains_cleanup(
             else:
                 queue.put_nowait(interruption)
             await asyncio.wait_for(cleanup_started.wait(), 1)
-            if interruption is not None:
+            reader_fault = isinstance(interruption, ReaderFault)
+            if interruption is not None and not reader_fault:
                 queue.put_nowait(BackendOnline())
                 queue.put_nowait(ReaderReady(0))
                 await asyncio.wait_for(recovered.wait(), 1)
                 assert calls == [reader]
                 runner.cancel()
             await asyncio.sleep(0)
+            # A reader-fault exit must also wait for cleanup before the devices close.
             assert not runner.done()
             assert not cleanup_finished.is_set()
             release_cleanup.set()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(RuntimeError if reader_fault else asyncio.CancelledError):
                 await asyncio.wait_for(runner, 1)
             assert cleanup_finished.is_set()
             assert not any(isinstance(event, CardRead) for event in events)
@@ -495,9 +501,8 @@ def test_repeated_scans_wait_for_feedback_and_collect_both_again(
     asyncio.run(check())
 
 
-@pytest.mark.parametrize(
-    "interruption", [BackendOffline(), ReaderFault(0, "disconnected"), CancelSession(0)]
-)
+# Reader faults exit in hardware mode instead of rearming; see the drains_cleanup test.
+@pytest.mark.parametrize("interruption", [BackendOffline(), CancelSession(0)])
 def test_rearm_waits_for_cancelled_reader_cleanup_without_another_event(
     monkeypatch: pytest.MonkeyPatch, interruption
 ) -> None:

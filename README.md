@@ -129,13 +129,15 @@ sudo dmesg -w                      # live kernel log while plugging/unplugging U
 
 ### Running the kiosk and diagnostics
 
+**Once `kiosk.service` is installed, run `sudo systemctl stop kiosk` before any command in this block, and `sudo systemctl start kiosk` when done.** Only one process can hold port 8000 and the readers. A manual `python -m kiosk` just fails with "address already in use", but the probe sends PN532 commands before it notices the OMNIKEY is taken, which can break the service's read in progress. `pkill` does not stop the service either: systemd restarts it five seconds later.
+
 ```sh
 python -u -m tools.student_number_probe /dev/input/eventX   # readers only, no backend
 python -u -m kiosk --device /dev/input/eventX               # full kiosk, simulated backend
 python -m kiosk                                             # desktop demo, no readers
 curl -s http://127.0.0.1:8000/                              # is the web server up?
 ss -ltnp | grep 8000                                        # what is holding port 8000?
-pkill -f "python -m kiosk"                                  # stop a stray kiosk process
+pkill -f "python -m kiosk"                                  # stop a stray manual run (not the service)
 pytest                                                      # tests (needs the dev group)
 ```
 
