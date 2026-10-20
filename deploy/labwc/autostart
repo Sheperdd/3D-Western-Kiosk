@@ -12,5 +12,10 @@ kiosk_browser() {
     done
 }
 
+# ponytail: fixed boot delay. Chromium launched right after login always came up grey
+# (both network services crash ~2 s in); launched 30 s later or relaunched, it renders.
+# Cause unknown. Shrink the number if boot is too slow; replace it once the cause is found.
+sleep 30
+
 kiosk_browser 1 &
 kiosk_browser 2 &
