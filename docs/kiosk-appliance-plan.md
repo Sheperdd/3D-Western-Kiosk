@@ -18,8 +18,8 @@ Already in place, no work needed: the web server starts before the readers open 
 
 - Inventory the OS, labwc desktop session, Chromium version and binary name, SPI enabled, both HDMI outputs (`HDMI-A-1`, `HDMI-A-2`), and the OMNIKEY's `/dev/input/by-id/` link. Keep the existing OS.
 - Back up the working SD card before appliance changes.
-- Create a non-administrator `kiosk` account in the `input`, `spi`, `gpio`, and `video` groups. It runs the Python service and is the desktop autologin user. Autologin must never land in an account with sudo: the kiosk is on public display and has USB ports. Verify Shane's own SSH access before enabling autologin.
-- Deploy a pinned git checkout to `/opt/kiosk` with its own virtual environment (`pip install -e ".[hardware]"`), separate from Shane's development checkout.
+- Create a non-administrator `kioskapp` account in the `input`, `spi`, `gpio`, `video`, and `render` groups. It runs the Python service and is the desktop autologin user. The existing `kiosk` account is Shane's admin account. Autologin must never land in an account with sudo: the kiosk is on public display and has USB ports. Verify Shane's own SSH access before enabling autologin.
+- Deploy a pinned git checkout to `/opt/kiosk` with its own virtual environment (`pip install -e ".[hardware]"`), separate from Shane's development checkout. The admin `kiosk` account owns it; `kioskapp` can read and run it but not change it.
 - Confirm NetworkManager reconnects automatically. Booting and showing local status must not depend on the network.
 - Turn off screen blanking with `raspi-config`.
 - Keep the filesystem writable. A read-only overlay is deferred; it would also discard the pending-operation record (section 4).
@@ -32,11 +32,11 @@ A system unit (starts at boot, independent of desktop login). Directives and why
 
 | Directive | Reason |
 |---|---|
-| `User=kiosk`, `WorkingDirectory=/opt/kiosk` | Non-admin account, deployed checkout. |
+| `User=kioskapp`, `WorkingDirectory=/opt/kiosk` | Non-admin account, deployed checkout. |
 | `ExecStart=/opt/kiosk/.venv/bin/python -m kiosk --device /dev/input/by-id/<omnikey>-event-kbd --backend <url>` | Stable reader path; real backend. |
 | `Environment=PYTHONUNBUFFERED=1` | `print()` is block-buffered when not attached to a terminal; without this the journal lags. |
 | `EnvironmentFile=/etc/kiosk/kiosk.env` | Backend credential. Root-owned, mode 0600, never committed, never logged. |
-| `StateDirectory=kiosk` | systemd creates `/var/lib/kiosk/`, writable by `kiosk`, for the pending-operation record. |
+| `StateDirectory=kiosk` | systemd creates `/var/lib/kiosk/`, writable by `kioskapp`, for the pending-operation record. |
 | `Restart=always`, `RestartSec=5` | Restart after any exit. `systemctl stop` still stays stopped. |
 | `StartLimitIntervalSec=0` (in `[Unit]`) | Never give up retrying, so an unplugged reader cannot permanently disable the service. |
 | `KillSignal=SIGINT`, `TimeoutStopSec=30` | Python's default SIGTERM handling exits **without** running `finally` blocks, so the PN532 RF-off and device cleanup in `open_readers` would be skipped. `asyncio.run` turns SIGINT into task cancellation, so the existing cleanup runs. No code needed. |
@@ -45,7 +45,7 @@ HTTP stays bound to `127.0.0.1:8000`. Logs go to the journal; its default size l
 
 ### Browsers
 
-The labwc `autostart` file (in the `kiosk` user's labwc config) starts one shell loop per display:
+The labwc `autostart` file (in the `kioskapp` user's labwc config) starts one shell loop per display:
 
 1. Wait until `curl -sf http://127.0.0.1:8000/` succeeds. If Chromium loads before the server is up, it shows its own error page, which does not reliably retry.
 2. `while :; do chromium …; sleep 5; done` so a closed or crashed browser comes back after five seconds.
@@ -61,7 +61,7 @@ Chromium flags per instance:
 
 Assign windows to outputs with labwc window rules (`windowRule identifier="kiosk-d1"` → `MoveToOutput output="HDMI-A-1"`). **Verify the app_id that the installed Chromium actually reports on Wayland.** Do not match on title: the page title is the same for both displays until JavaScript runs. Do not rely on launch order. [labwc configuration reference](https://labwc.github.io/labwc-config.5.html)
 
-Python restarts need no browser action. **Monitor reconnection** is manual for Friday: over SSH, `pkill chromium` as the kiosk user; the loops relaunch and the window rules reapply. Automatic hotplug handling is deferred.
+Python restarts need no browser action. **Monitor reconnection** is manual for Friday: over SSH, `pkill chromium` as `kioskapp`; the loops relaunch and the window rules reapply. Automatic hotplug handling is deferred.
 
 ## 3. Readers and fault recovery
 
@@ -104,7 +104,7 @@ Deferred: hardware watchdog, recovery from a fully frozen OS, UPS, read-only ove
 
 ### Tuesday: configuration, startup, backend inputs
 
-- Inventory and back up the Pi; create the `kiosk` account; deploy to `/opt/kiosk`; find the by-id path.
+- Inventory and back up the Pi; create the `kioskapp` account; deploy to `/opt/kiosk`; find the by-id path.
 - `kiosk.service` as above; exit-on-reader-fault; remove identifier prints; desktop autologin.
 - Confirm startup with no keyboard or terminal session.
 - Ops side ([ops-api.md](ops-api.md)): kiosk and node tokens, a test environment, and the training-level stub until the dashboard endpoint lands. Prepare two test students: one with training, one without.

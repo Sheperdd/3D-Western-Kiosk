@@ -71,3 +71,114 @@ Every controller state and final outcome has student-facing copy. The public dis
 The UI uses plain HTML, CSS and JavaScript with no build step or external assets. During reader cleanup, display 1 says “Getting ready for the next card” and display 2 remains “In use.” The ready message appears when acquisition is available again. The local student API exposes `state` and `outcome`; the public API exposes only `status`.
 
 Review the wording and check readability on the actual kiosk monitors before deployment. The tests cover the core's decisions using synthetic events. They do not establish physical same-card assurance, backend persistence, replacement invalidation, midnight expiry, or tool enforcement. The internal event/effect names are provisional and do not specify network endpoints. See [plan section 7](docs/plan.md#7-core-migration-implemented-and-next-work) for controller obligations and integration work. Shane normally writes implementation with mentor support; this core migration and the dummy frontend were explicitly delegated.
+
+## Raspberry Pi command reference
+
+Run these on the Pi (over SSH or a local terminal), not on Windows. Paths in angle brackets are placeholders. Commands marked *(after deployment)* depend on the `kioskapp` account, `/opt/kiosk` checkout, and `kiosk.service` described in the [appliance plan](docs/kiosk-appliance-plan.md); they do not exist yet.
+
+### System and access
+
+```sh
+ssh <user>@<pi-hostname>.local     # connect from the dev machine
+cat /etc/os-release                # OS version
+python3 --version
+uname -a                           # kernel and architecture
+hostname -I                        # Pi's IP addresses
+sudo apt update && sudo apt full-upgrade
+sudo reboot
+sudo shutdown -h now               # always do this before rewiring the PN532
+vcgencmd measure_temp              # CPU temperature
+vcgencmd get_throttled             # 0x0 = no undervoltage/throttling ever seen
+df -h                              # free disk space
+free -h                            # free memory
+```
+
+### Project setup and updates
+
+```sh
+git clone <repo-url> && cd Kiosk
+python3 -m venv .venv
+source .venv/bin/activate          # every new shell; `deactivate` to leave
+python -m pip install -e ".[hardware]"
+pip install --group dev            # only if running the checks on the Pi
+git pull                           # development checkout only
+git log --oneline -5               # which revision is running
+```
+
+### SPI and the PN532
+
+```sh
+sudo raspi-config                  # Interface Options → SPI → Enable; Display → Screen Blanking → Off
+sudo raspi-config nonint get_spi   # 0 = SPI enabled
+ls /dev/spidev*                    # expect /dev/spidev0.0 and /dev/spidev0.1
+groups                             # need spi and gpio (and input for the OMNIKEY)
+sudo usermod -aG spi,gpio,input $USER   # then log out and back in
+pinout                             # header diagram; check pin 1 before counting
+```
+
+### Finding the OMNIKEY
+
+```sh
+sudo apt install usbutils evtest
+lsusb                              # is the OMNIKEY on USB?
+ls -l /dev/input/by-id/            # stable link; prefer the ...-event-kbd entry
+cat /proc/bus/input/devices        # name → eventN mapping
+sudo evtest --grab /dev/input/eventX   # watch raw key events; Ctrl+C before running Python
+sudo dmesg -w                      # live kernel log while plugging/unplugging USB
+```
+
+### Running the kiosk and diagnostics
+
+```sh
+python -u -m tools.student_number_probe /dev/input/eventX   # readers only, no backend
+python -u -m kiosk --device /dev/input/eventX               # full kiosk, simulated backend
+python -m kiosk                                             # desktop demo, no readers
+curl -s http://127.0.0.1:8000/                              # is the web server up?
+ss -ltnp | grep 8000                                        # what is holding port 8000?
+pkill -f "python -m kiosk"                                  # stop a stray kiosk process
+pytest                                                      # tests (needs the dev group)
+```
+
+Open the displays in the Pi's browser at `http://127.0.0.1:8000/?display=1` and `?display=2`. To view them from your laptop without exposing the port, tunnel it: `ssh -L 8000:127.0.0.1:8000 <user>@<pi-hostname>.local`, then open the same URLs locally.
+
+### Service and logs *(after deployment)*
+
+```sh
+sudo systemctl status kiosk
+sudo systemctl start|stop|restart kiosk
+sudo systemctl enable kiosk        # start at boot
+sudo systemctl daemon-reload       # after editing the unit file
+journalctl -u kiosk -f             # follow live logs
+journalctl -u kiosk -b             # logs since this boot
+journalctl -u kiosk --since "10 min ago"
+journalctl -u kiosk | grep -E '[0-9]{9}'   # must return nothing (no student numbers logged)
+systemd-analyze verify /etc/systemd/system/kiosk.service
+```
+
+### Displays and browsers *(after deployment)*
+
+```sh
+wlr-randr                          # list outputs (HDMI-A-1, HDMI-A-2) under labwc
+chromium --version                 # binary may be chromium-browser on older images
+sudo -u kioskapp pkill chromium       # relaunch both kiosk windows after a monitor replug
+```
+
+### Network and clock
+
+```sh
+nmcli device status                # NetworkManager connection state
+nmcli connection show
+ping -c 3 <backend-host>
+timedatectl                        # "System clock synchronized: yes" before TLS works
+```
+
+### Pending-operation hold and rollback *(after deployment)*
+
+```sh
+ls -l /var/lib/kiosk/              # a file here means OUTCOME_UNKNOWN is held
+cat /var/lib/kiosk/<pending-file>  # check the request ID against ops before deleting
+sudo rm /var/lib/kiosk/<pending-file> && sudo systemctl restart kiosk   # operator-only, last resort
+cd /opt/kiosk && git checkout <known-good-commit> && sudo systemctl restart kiosk   # as the admin kiosk account
+```
+
+Back up the SD card before appliance changes by imaging it from another computer (for example with Raspberry Pi Imager or `dd`), not from the running Pi.
