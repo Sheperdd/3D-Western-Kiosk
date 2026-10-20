@@ -13,5 +13,10 @@ kiosk_browser() {
     done
 }
 
+# ponytail: fixed boot delay. On 2026-10-20 the first launch after boot came up grey twice
+# (both network services crashed ~2 s after start, cause unknown); loop relaunches were fine.
+# Replace with a real readiness check once the cause is found.
+sleep 30
+
 kiosk_browser 1 &
 kiosk_browser 2 &
