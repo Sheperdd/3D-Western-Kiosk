@@ -1,0 +1,22 @@
+# Install: sudo cp deploy/kiosk.service /etc/systemd/system/ && sudo systemctl daemon-reload
+# Reasons for each directive: docs/kiosk-appliance-plan.md section 2.
+[Unit]
+Description=Makerspace access kiosk
+# Never stop retrying, so an unplugged reader cannot disable the service for good.
+StartLimitIntervalSec=0
+
+[Service]
+User=kioskapp
+WorkingDirectory=/opt/kiosk
+# TODO(Wednesday): add --backend <url> and EnvironmentFile=/etc/kiosk/kiosk.env with the client.
+ExecStart=/opt/kiosk/.venv/bin/python -m kiosk --device /dev/input/by-id/usb-HID_OMNIKEY_5427_CK_01010053595632323116284F02243630-event-kbd
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=kiosk
+Restart=always
+RestartSec=5
+# SIGINT lets asyncio cancel tasks so open_readers' cleanup (PN532 RF off) runs.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
