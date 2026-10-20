@@ -17,8 +17,12 @@ async def main():
             while True:
                 print("Waiting for UID...", flush=True)
 
-                if await read_card_async(uid_reader, student_reader) is None:
+                pair = await read_card_async(uid_reader, student_reader)
+                if pair is None:
                     print("Incomplete scan. Remove the card and try again.", flush=True)
+                else:
+                    uid, number = pair
+                    print(f"UID: {uid}  Student number (unverified): {number}", flush=True)
                 # shortcut: the pause assumes card removal; add detection if required.
                 await asyncio.sleep(2)
     except OSError as error:

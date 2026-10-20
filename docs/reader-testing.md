@@ -119,7 +119,7 @@ For the repeated-scan Pi trial:
 1. Present card A, hold it through the student-number beep, verify both prints, then take it back.
 2. Wait for `Ready for next card.` and the displays' ready messages. Use the current [result durations](display-spec.md#display-1-result-messages); cleanup must also finish before readiness returns.
 3. Present card A again without restarting. Expect one new completed pair and one simulated activation.
-4. Take A back, wait for readiness, then present card B. Verify B's printed student number and UID; neither value may be carried over from A.
+4. Take A back, wait for readiness, then present card B. The kiosk does not print identifiers; check that neither value carries over from A with the reader probe, which does.
 5. If a scan misses the student number, wait for incomplete-scan feedback and readiness, then retry without restarting. The incomplete attempt must not print `ActivateUid`.
 6. Repeat several alternating-card cycles, then Ctrl+C while waiting for a card to check shutdown. Record any stale values, unexpected errors, or failure to rearm. Do not treat a held-card repeat as a removal-detection failure; removal is outside this version's behavior.
 

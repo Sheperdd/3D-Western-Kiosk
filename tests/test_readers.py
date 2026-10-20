@@ -172,7 +172,7 @@ def test_probe_preserves_handover_input_and_times_out_incomplete_scans(
     asyncio.run(check())
     output = capsys.readouterr().out
     assert "000999999" not in output
-    assert ("Student number received (unverified): 000123456" in output) == bool(scan)
+    assert ("UID: 0001ABCD  Student number (unverified): 000123456" in output) == bool(scan)
     assert ("Incomplete scan." in output) == (not scan)
 
 

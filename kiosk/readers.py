@@ -116,12 +116,12 @@ async def read_card_async(
         uid = await read_uid_async(uid_reader)
         if uid is not None:
             break
-    print(f"UID received: {uid}")
+    print("UID received.")
     print("Keep the card presented; waiting for student number...")
     number = await read_student_number_async(student_reader, timeout=student_timeout)
     if number is None:
         return None
-    print(f"Student number received (unverified): {number}")
+    print("Student number received.")
     return uid, number
 
 

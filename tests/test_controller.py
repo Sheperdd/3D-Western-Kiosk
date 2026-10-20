@@ -268,7 +268,8 @@ def test_hardware_acquisition_waits_for_readiness_and_rearms_when_ready(
 
     asyncio.run(check())
     output = capsys.readouterr().out
-    assert output.count("UID received: 0001ABCD") == (0 if reader_fails else 1)
+    assert output.count("UID received.") == (0 if reader_fails else 1)
+    assert "0001ABCD" not in output and "000000001" not in output
 
 
 @pytest.mark.parametrize("pair", [("0001ABCD", "000000001"), None])
