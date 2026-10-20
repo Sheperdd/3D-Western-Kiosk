@@ -4,19 +4,13 @@
 kiosk_browser() {
     while :; do
         until curl -sf http://127.0.0.1:8000/ > /dev/null; do sleep 1; done
-        # No --kiosk: it requests fullscreen before rc.xml can move the window.
-        chromium --ozone-platform=wayland --no-first-run --noerrdialogs \
+        chromium --ozone-platform=wayland --kiosk --no-first-run --noerrdialogs \
             --incognito --password-store=basic \
             --class="kiosk-d$1" --user-data-dir="$HOME/.cache/kiosk-d$1" \
             "http://127.0.0.1:8000/?display=$1"
         sleep 5
     done
 }
-
-# ponytail: fixed boot delay. On 2026-10-20 the first launch after boot came up grey twice
-# (both network services crashed ~2 s after start, cause unknown); loop relaunches were fine.
-# Replace with a real readiness check once the cause is found.
-sleep 30
 
 kiosk_browser 1 &
 kiosk_browser 2 &

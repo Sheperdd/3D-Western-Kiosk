@@ -3,15 +3,13 @@
 <!-- labwc runs with -m, so this merges with /etc/xdg/labwc/rc.xml. -->
 <labwc_config>
   <windowRules>
-    <!-- MoveToOutput ignores fullscreen windows, so Chromium starts windowed (no kiosk flag)
-         and the rule moves it first. Toggling a kiosk-mode window out of fullscreen left it grey. -->
+    <!-- Chromium's kiosk mode makes the window fullscreen itself; the rule only picks the output.
+         Never use ToggleFullscreen here: every boot test with a toggle came up grey or windowed. -->
     <windowRule identifier="kiosk-d1">
       <action name="MoveToOutput" output="HDMI-A-2"/>
-      <action name="ToggleFullscreen"/>
     </windowRule>
     <windowRule identifier="kiosk-d2">
       <action name="MoveToOutput" output="HDMI-A-1"/>
-      <action name="ToggleFullscreen"/>
     </windowRule>
   </windowRules>
 </labwc_config>
