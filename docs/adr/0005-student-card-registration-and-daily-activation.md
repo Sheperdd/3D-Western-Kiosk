@@ -5,6 +5,8 @@ date: 2026-09-16
 
 # Persistent student-card registration with separate daily activation
 
+> **Superseded, 2026-10-21:** [ADR-0007](0007-kiosk-talks-to-gatekeeper.md) replaces registration and activation with one tap to the access gatekeeper, which keeps permanent card links. The text below is historical.
+>
 > **Partly superseded, 2026-10-20:** [ADR-0006](0006-tap-out-and-daily-registration.md) makes a repeat tap check the student out, and registrations now last one visit (wiped at check-out or midnight). Backend authority, verified replacement, and the collect-both rule below still apply.
 
 The adjacent-reader arrangement produced a student number and a stable hexadecimal card UID from one student card. Student v1 will therefore register existing student cards instead of lending separate RFID cards, with broader card compatibility and reliable pairing still to be validated. Registration persists, while a separate backend-confirmed activation grants a visit after current account, general-induction, and eligibility checks.

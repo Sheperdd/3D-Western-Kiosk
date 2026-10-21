@@ -3,12 +3,84 @@ import sys
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from kiosk import controller, readers
-from kiosk.events import BackendOnline, CardRead, KioskState, ReaderFault, ReaderReady
+from kiosk.events import CardRead, GatekeeperOnline, KioskState, ReaderFault, ReaderReady
 from tools import student_number_probe as probe
+
+
+@pytest.fixture
+def reader_hardware(monkeypatch: pytest.MonkeyPatch):
+    device = MagicMock()
+    device.name = "OMNIKEY 5427 CK"
+    spi = MagicMock()
+    chip_select = MagicMock()
+    pn532 = MagicMock()
+    pn532.return_value.call_function.return_value = b""
+    monkeypatch.setitem(sys.modules, "evdev", SimpleNamespace(InputDevice=lambda path: device))
+    monkeypatch.setitem(sys.modules, "board", SimpleNamespace(SPI=spi, D5=5))
+    monkeypatch.setitem(sys.modules, "digitalio", SimpleNamespace(DigitalInOut=chip_select))
+    monkeypatch.setitem(sys.modules, "adafruit_pn532.spi", SimpleNamespace(PN532_SPI=pn532))
+    return device, spi, chip_select, pn532
+
+
+@pytest.mark.parametrize("busy", [False, True], ids=["wrong-device", "already-grabbed"])
+def test_open_readers_rejects_input_before_touching_pn532(reader_hardware, busy) -> None:
+    device, spi, chip_select, pn532 = reader_hardware
+    if busy:
+        device.grab_context.return_value.__enter__.side_effect = OSError("Reader already in use")
+    else:
+        device.name = "Keyboard"
+
+    with pytest.raises(OSError if busy else ValueError), readers.open_readers("test-device"):
+        pytest.fail("Unavailable input device was accepted")
+
+    spi.assert_not_called()
+    chip_select.assert_not_called()
+    pn532.assert_not_called()
+    device.close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure_at", [None, "setup", "body"])
+def test_open_readers_turns_off_rf_before_releasing_devices(reader_hardware, failure_at) -> None:
+    device, spi, chip_select, pn532 = reader_hardware
+    reader = pn532.return_value
+
+    def configure():
+        device.grab_context.return_value.__enter__.assert_called_once()
+        if failure_at == "setup":
+            raise RuntimeError("Setup failed")
+
+    def field_command(*args, **kwargs):
+        device.grab_context.return_value.__exit__.assert_not_called()
+        spi.return_value.__exit__.assert_not_called()
+        chip_select.return_value.__exit__.assert_not_called()
+        device.close.assert_not_called()
+        return b""
+
+    reader.SAM_configuration.side_effect = configure
+    reader.call_function.side_effect = field_command
+
+    def use_readers():
+        with readers.open_readers("test-device") as pair:
+            assert pair == (reader, device)
+            if failure_at == "body":
+                raise RuntimeError("Body failed")
+
+    if failure_at is None:
+        use_readers()
+    else:
+        with pytest.raises(RuntimeError, match="failed"):
+            use_readers()
+
+    reader.call_function.assert_called_with(0x32, params=b"\x01\x02", response_length=0)
+    device.grab_context.return_value.__exit__.assert_called_once()
+    spi.return_value.__exit__.assert_called_once()
+    chip_select.return_value.__exit__.assert_called_once()
+    device.close.assert_called_once()
 
 
 @pytest.fixture
@@ -105,10 +177,10 @@ def test_controller_first_scan_runs_real_threaded_reader_pipeline(
 
         monkeypatch.setattr(controller, "handle", observe)
         monkeypatch.setattr(controller, "fire_timeout", timer)
-        monkeypatch.setattr(controller, "DEMO_ACTIVATION_DELAY", 0)
+        monkeypatch.setattr(controller, "DEMO_TAP_DELAY", 0)
         # Checked in already, so the tap reaches a result (check-out) without registration.
         monkeypatch.setattr(controller, "DEMO_CHECKED_IN", {"0001ABCD"})
-        queue.put_nowait(BackendOnline())
+        queue.put_nowait(GatekeeperOnline())
         queue.put_nowait(ReaderReady(0))
         runner = asyncio.create_task(
             controller.run(queue, hardware_mode=True, uid_reader=UidReader(), student_reader=device)

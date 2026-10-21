@@ -1,5 +1,7 @@
 # Ops API: kiosk and machine nodes
 
+> **Superseded, 2026-10-21:** ops-backend is not being run; the access gatekeeper took over its job. The kiosk's contract is now [kiosk-api.md](kiosk-api.md) ([ADR-0007](adr/0007-kiosk-talks-to-gatekeeper.md)). This file is historical.
+
 **Status:** sketch for the Friday 2026-10-23 supervised test. Owner: Shane (taking over ops-backend). Move this file to `ops-backend/docs/` once the takeover is formal. It supersedes the open "to agree" items in [backend-agreement.md](backend-agreement.md) where they conflict.
 
 **Updated 2026-10-20** for tap-out and daily registration ([ADR-0006](adr/0006-tap-out-and-daily-registration.md)).

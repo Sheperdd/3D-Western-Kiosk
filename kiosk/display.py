@@ -34,7 +34,7 @@ def create_app() -> web.Application:
     app = web.Application()
 
     app[DISPLAY_DATA] = {
-        1: {"state": "STARTING", "outcome": None},
+        1: {"state": "STARTING", "result": None, "reason": None, "message": None, "notices": []},
         2: {"status": "STARTING"},
     }
 

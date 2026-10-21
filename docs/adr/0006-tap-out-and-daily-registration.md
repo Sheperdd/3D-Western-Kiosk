@@ -5,6 +5,8 @@ date: 2026-10-20
 
 # Tap to check out, with registrations wiped daily
 
+> **Mostly superseded, 2026-10-21:** [ADR-0007](0007-kiosk-talks-to-gatekeeper.md). The tap toggle, eligibility-free check-out and fail-closed offline check-out still apply. The daily UID wipe, midnight expiry, revoked-cards table, two-operation flow and "no double-tap guard" do not: the gatekeeper keeps permanent card links, resets visits nightly at `nightlyResetTime`, and debounces repeat taps for 3 s.
+
 Students need to be able to leave the makerspace by tapping their card again. A tap with a card that has an active visit now checks the student out; any other tap checks them in. Card registrations are also wiped every day: the UID↔student association lasts one visit and ends at check-out or at midnight America/Toronto, whichever comes first. The first tap of each day registers the card again.
 
 The backend makes the toggle decision. The kiosk sends the same two logical operations as before: `ActivateUid` now returns `CHECKED_OUT` for an active card or `UNREGISTERED` for any other card, and `RegisterAndActivate` becomes the everyday check-in. The kiosk state machine keeps its shape and its same-card gate (`IdentityConfirmed` before registration). Ops stores the UID on the visit instead of in a separate registration table, so the daily wipe and the check-out both follow from the visit's `ended_at` and `expires_at`. No midnight job is needed and none can be missed. Check-out does no eligibility check, so a suspended student or a dashboard outage cannot stop someone from leaving. Contract: [ops-api.md](../ops-api.md).

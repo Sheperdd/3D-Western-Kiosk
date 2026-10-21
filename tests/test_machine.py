@@ -1,24 +1,24 @@
+from dataclasses import replace
+
 import pytest
 
 from kiosk.events import (
-    ActivateUid,
-    BackendError,
-    BackendOffline,
-    BackendOnline,
-    BackendOp,
-    BackendResult,
     BadScan,
     CancelSession,
+    CancelTimeout,
     CardRead,
     Event,
     FailureKind,
-    IdentityConfirmed,
+    GatekeeperError,
+    GatekeeperOffline,
+    GatekeeperOnline,
+    GatekeeperResult,
     KioskState,
-    Outcome,
     ReaderFault,
     ReaderReady,
-    RegisterAndActivate,
+    Result,
     StartTimeout,
+    Tap,
     Timeout,
     TimeoutName,
 )
@@ -27,257 +27,162 @@ from kiosk.machine import Context, handle
 # Synthetic identifiers only. Leading zeros belong to the identifiers.
 UID = "0001ABCD"
 STUDENT = "000000001"
-READY = Context(backend_online=True, reader_ready=True)
-IDENTITY = IdentityConfirmed(1, UID, STUDENT)
+READY = Context(gatekeeper_online=True, reader_ready=True)
 
 
 def start():
-    return handle(KioskState.IDLE, READY, CardRead(1, UID, "000000001"))
+    return handle(KioskState.IDLE, READY, CardRead(1, UID, STUDENT))
 
 
-def awaiting_identity():
-    state, ctx, _ = start()
-    return handle(state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED))
-
-
-def waiting_for(op: BackendOp):
-    if op == BackendOp.ACTIVATE_UID:
-        return start()
-    state, ctx, _ = awaiting_identity()
-    return handle(state, ctx, IDENTITY)
-
-
-@pytest.mark.parametrize("backend_first", [True, False])
-def test_startup_requires_both_backend_and_reader_readiness(backend_first: bool) -> None:
+@pytest.mark.parametrize("gatekeeper_first", [True, False])
+def test_startup_requires_both_gatekeeper_and_reader_readiness(gatekeeper_first: bool) -> None:
     state, ctx = KioskState.OFFLINE, Context()
-    events = [BackendOnline(), ReaderReady(0)]
-    if not backend_first:
+    events = [GatekeeperOnline(), ReaderReady(0)]
+    if not gatekeeper_first:
         events.reverse()
     for event in events:
-        assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
+        assert handle(state, ctx, CardRead(1, UID, STUDENT)) == (state, ctx, [])
         state, ctx, effects = handle(state, ctx, event)
         assert effects == []
     assert (state, ctx) == (KioskState.IDLE, READY)
 
 
-def test_complete_pair_starts_activation_without_confirming_identity() -> None:
-    state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, UID.lower(), "000000001"))
-    assert state == KioskState.ACTIVATING
-    assert ctx.uid == UID
-    assert ctx.observed_student_number == STUDENT
-    assert ctx.confirmed_student_number is None
-    assert ctx.pending_op == BackendOp.ACTIVATE_UID
-    assert effects == [
-        StartTimeout(1, TimeoutName.SESSION),
-        ActivateUid(1, UID, STUDENT),
-    ]
+def test_complete_pair_sends_one_tap() -> None:
+    state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, UID.lower(), STUDENT))
+    assert state == KioskState.CHECKING
+    assert ctx.tap_id == 1
+    assert effects == [StartTimeout(1, TimeoutName.TAP), Tap(1, UID, STUDENT)]
 
 
 @pytest.mark.parametrize("student", ["", "123", "1234567890", "123?56789", "１２３４５６７８９"])
-def test_incomplete_or_invalid_pair_never_starts_backend(student: str) -> None:
+def test_invalid_student_number_never_reaches_gatekeeper(student: str) -> None:
     state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, UID, student))
     assert state == KioskState.RESULT
-    assert ctx.outcome == Outcome.READ_AGAIN
-    assert (
-        ctx.uid
-        is ctx.observed_student_number
-        is ctx.confirmed_student_number
-        is ctx.pending_op
-        is None
-    )
-    assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
-
-
-def test_confirmation_must_match_observed_pair() -> None:
-    state, ctx, _ = awaiting_identity()
-    state, ctx, effects = handle(state, ctx, IdentityConfirmed(1, UID, "000000002"))
-    assert state == KioskState.RESULT
-    assert ctx.outcome == Outcome.READ_AGAIN
-    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
-
-
-def test_conflicting_raw_number_during_activation_cannot_become_trusted() -> None:
-    state, ctx, _ = start()
-    state, ctx, effects = handle(state, ctx, CardRead(1, UID, "000000002"))
-    assert state == KioskState.OUTCOME_UNKNOWN
-    assert ctx.observed_student_number is ctx.confirmed_student_number is None
-    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
-
-
-def test_tap_checks_out_and_the_next_session_checks_in_again() -> None:
-    state, ctx, _ = start()
-    state, ctx, effects = handle(
-        state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)
-    )
-    assert state == KioskState.RESULT
-    assert ctx.outcome == Outcome.CHECKED_OUT
-    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
-    assert StartTimeout(1, TimeoutName.RESULT) in effects
-    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
-
-    # A held/repeated read in the same session cannot tap again or extend the result timer.
-    assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
-    state, ctx, _ = handle(state, ctx, Timeout(1, TimeoutName.RESULT))
-    assert state == KioskState.IDLE
-    assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
-
-    # The next session's tap finds no visit and goes down the check-in path.
-    state, ctx, effects = handle(state, ctx, CardRead(2, UID, "000000001"))
-    assert ActivateUid(2, UID, STUDENT) in effects
-    state, ctx, _ = handle(state, ctx, IdentityConfirmed(2, UID, STUDENT))
-    state, ctx, effects = handle(
-        state, ctx, BackendResult(2, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)
-    )
-    assert state == KioskState.REGISTERING
-    assert effects == [RegisterAndActivate(2, UID, STUDENT)]
-
-
-@pytest.mark.parametrize("identity_first", [True, False])
-@pytest.mark.parametrize("outcome", [Outcome.REGISTERED_AND_ACTIVE, Outcome.REPLACED_AND_ACTIVE])
-def test_registration_and_replacement_accept_both_arrival_orders(
-    identity_first: bool, outcome: Outcome
-) -> None:
-    state, ctx, initial_effects = start()
-    unregistered = BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)
-    events = [IDENTITY, unregistered] if identity_first else [unregistered, IDENTITY]
-    effects = []
-    for index, event in enumerate(events):
-        state, ctx, effects = handle(state, ctx, event)
-        if index == 0:
-            assert state == (
-                KioskState.ACTIVATING if identity_first else KioskState.AWAITING_IDENTITY
-            )
-            assert ctx.outcome is None
-            assert effects == []
-    assert state == KioskState.REGISTERING
-    assert ctx.confirmed_student_number == STUDENT
-    assert effects == [RegisterAndActivate(1, UID, STUDENT)]
-    assert ctx.pending_op == BackendOp.REGISTER_AND_ACTIVATE
-    # The registration phase shares the original deadline; it doesn't restart the clock.
-    assert StartTimeout(1, TimeoutName.SESSION) in initial_effects
-    assert not any(isinstance(effect, StartTimeout) for effect in effects)
-
-    state, ctx, effects = handle(
-        state, ctx, BackendResult(1, BackendOp.REGISTER_AND_ACTIVATE, outcome)
-    )
-    assert state == KioskState.RESULT
-    assert ctx.outcome == outcome
-    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
-    assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
-
-
-@pytest.mark.parametrize(
-    ("op", "outcome"),
-    [
-        (BackendOp.ACTIVATE_UID, Outcome.DENIED),
-        (BackendOp.ACTIVATE_UID, Outcome.UID_CONFLICT),
-        *(
-            (BackendOp.REGISTER_AND_ACTIVATE, outcome)
-            for outcome in (
-                Outcome.UNKNOWN_STUDENT,
-                Outcome.MISSING_INDUCTION,
-                Outcome.DENIED,
-                Outcome.UID_CONFLICT,
-            )
-        ),
-    ],
-)
-def test_backend_denial_selects_feedback_without_any_followup_write(
-    op: BackendOp, outcome: Outcome
-) -> None:
-    state, ctx, _ = waiting_for(op)
-    state, ctx, effects = handle(state, ctx, BackendResult(1, op, outcome, "policy_reason"))
-    assert state == KioskState.RESULT
-    assert ctx.outcome == outcome
-    assert ctx.reason == "policy_reason"
-    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
-    assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
-
-
-def test_duplicates_and_previous_operation_replies_do_not_repeat_registration() -> None:
-    state, ctx, _ = start()
-    state, ctx, _ = handle(state, ctx, IDENTITY)
-    assert handle(state, ctx, IDENTITY) == (state, ctx, [])
-    assert handle(state, ctx, CardRead(1, UID.lower(), "000000001")) == (state, ctx, [])
-    old_reply = BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)
-    state, ctx, _ = handle(state, ctx, old_reply)
-    for event in (IDENTITY, old_reply, BackendError(1, BackendOp.ACTIVATE_UID)):
-        assert handle(state, ctx, event) == (state, ctx, [])
+    assert ctx.result == Result.READ_AGAIN
+    assert effects == [StartTimeout(1, TimeoutName.RESULT)]
 
 
 @pytest.mark.parametrize("uid", ["", "123", "GG00", "00 01", "０１", "00\n"])
-def test_invalid_uid_never_reaches_backend(uid: str) -> None:
-    state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, uid, "000000001"))
+def test_invalid_uid_never_reaches_gatekeeper(uid: str) -> None:
+    state, ctx, effects = handle(KioskState.IDLE, READY, CardRead(1, uid, STUDENT))
     assert state == KioskState.RESULT
-    assert ctx.outcome == Outcome.READ_AGAIN
-    assert ctx.uid is ctx.pending_op is None
-    assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
-
-
-@pytest.mark.parametrize("student", ["", "12x", " 123", "１２３", "123\n"])
-def test_invalid_student_number_cannot_register(student: str) -> None:
-    state, ctx, _ = awaiting_identity()
-    state, ctx, effects = handle(state, ctx, IdentityConfirmed(1, UID, student))
-    assert state == KioskState.RESULT
-    assert ctx.outcome == Outcome.READ_AGAIN
-    assert ctx.uid is ctx.confirmed_student_number is None
-    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
+    assert ctx.result == Result.READ_AGAIN
+    assert not any(isinstance(effect, Tap) for effect in effects)
 
 
 @pytest.mark.parametrize(
-    "event",
+    "result",
+    [Result.CHECKED_IN, Result.CHECKED_OUT, Result.DENIED, Result.IGNORED_DUPLICATE],
+)
+def test_gatekeeper_answer_is_shown_as_given(result: Result) -> None:
+    state, ctx, _ = start()
+    answer = GatekeeperResult(1, result, "SOME_CODE", "Welcome, Sam.", ("Refresher due.",), "Sam")
+    state, ctx, effects = handle(state, ctx, answer)
+    assert state == KioskState.RESULT
+    assert (ctx.result, ctx.reason, ctx.message, ctx.notices, ctx.first_name) == (
+        result,
+        "SOME_CODE",
+        "Welcome, Sam.",
+        ("Refresher due.",),
+        "Sam",
+    )
+    assert effects == [CancelTimeout(1, TimeoutName.TAP), StartTimeout(1, TimeoutName.RESULT)]
+
+
+def test_unknown_reason_code_does_not_crash() -> None:
+    state, ctx, _ = start()
+    state, ctx, _ = handle(state, ctx, GatekeeperResult(1, Result.DENIED, "BRAND_NEW_CODE"))
+    assert (state, ctx.reason) == (KioskState.RESULT, "BRAND_NEW_CODE")
+
+
+@pytest.mark.parametrize(
+    ("kind", "shown"),
     [
-        IdentityConfirmed(1, "0002ABCD", STUDENT),
-        CardRead(1, "0002ABCD", "000000001"),
-        BadScan(1, "mixed"),
+        (FailureKind.UNREACHABLE, Result.UNREACHABLE),
+        (FailureKind.BAD_REQUEST, Result.READ_AGAIN),
+        (FailureKind.BAD_KEY, Result.NOT_SET_UP),
     ],
 )
-def test_conflicting_capture_before_registration_discards_both_identifiers(event: Event) -> None:
-    state, ctx, _ = awaiting_identity()
-    state, ctx, effects = handle(state, ctx, event)
-    assert state == KioskState.RESULT
-    assert ctx.outcome == Outcome.READ_AGAIN
-    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
-    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
-
-
-def test_conflicting_student_numbers_during_activation_do_not_overwrite_the_first() -> None:
+def test_gatekeeper_error_shows_local_feedback(kind: FailureKind, shown: Result) -> None:
     state, ctx, _ = start()
-    state, ctx, _ = handle(state, ctx, IDENTITY)
-    state, ctx, effects = handle(state, ctx, IdentityConfirmed(1, UID, "000000002"))
-    assert state == KioskState.OUTCOME_UNKNOWN
-    assert ctx.uid is ctx.confirmed_student_number is None
-    assert ctx.pending_op == BackendOp.ACTIVATE_UID
-    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
-
-
-def test_identity_before_a_session_is_ignored() -> None:
-    assert handle(KioskState.IDLE, READY, IDENTITY) == (KioskState.IDLE, READY, [])
-
-
-def test_missing_identity_expires_without_registration() -> None:
-    state, ctx, _ = awaiting_identity()
-    state, ctx, effects = handle(state, ctx, Timeout(1, TimeoutName.SESSION))
+    state, ctx, effects = handle(state, ctx, GatekeeperError(1, kind))
     assert state == KioskState.RESULT
-    assert ctx.outcome == Outcome.SESSION_EXPIRED
-    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
-    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
+    assert ctx.result == shown
+    assert ctx.gatekeeper_online  # Health polling, not one failed tap, decides offline.
+    assert StartTimeout(1, TimeoutName.RESULT) in effects
+
+
+def test_tap_timeout_shows_unreachable_without_holding() -> None:
+    state, ctx, _ = start()
+    state, ctx, effects = handle(state, ctx, Timeout(1, TimeoutName.TAP))
+    assert state == KioskState.RESULT
+    assert ctx.result == Result.UNREACHABLE
+    assert effects == [CancelTimeout(1, TimeoutName.TAP), StartTimeout(1, TimeoutName.RESULT)]
+    # The reply arriving after the deadline cannot replace what is on screen.
+    assert handle(state, ctx, GatekeeperResult(1, Result.CHECKED_IN)) == (state, ctx, [])
+
+
+def test_result_expiry_clears_the_screen_and_the_next_tap_starts_fresh() -> None:
+    state, ctx, _ = start()
+    state, ctx, _ = handle(state, ctx, GatekeeperResult(1, Result.CHECKED_OUT, message="Bye."))
+    # A held/repeated read of the same tap cannot tap again or extend the result timer.
+    assert handle(state, ctx, CardRead(1, UID, STUDENT)) == (state, ctx, [])
+    state, ctx, effects = handle(state, ctx, Timeout(1, TimeoutName.RESULT))
+    assert state == KioskState.IDLE
+    assert ctx == replace(READY, tap_id=1)
+    assert effects == [CancelTimeout(1, TimeoutName.RESULT)]
+    assert handle(state, ctx, CardRead(1, UID, STUDENT)) == (state, ctx, [])
+    _, _, effects = handle(state, ctx, CardRead(2, UID, STUDENT))
+    assert Tap(2, UID, STUDENT) in effects
+
+
+def test_bad_scan_in_idle_asks_to_read_again() -> None:
+    state, ctx, effects = handle(KioskState.IDLE, READY, BadScan(0, "student number missing"))
+    assert state == KioskState.RESULT
+    assert (ctx.result, ctx.reason) == (Result.READ_AGAIN, "student number missing")
+    assert effects == [StartTimeout(0, TimeoutName.RESULT)]
+
+
+@pytest.mark.parametrize(
+    ("event", "resting"),
+    [
+        (CancelSession(1), KioskState.IDLE),
+        (ReaderFault(1, "field-off timeout"), KioskState.READER_ERROR),
+        (GatekeeperOffline(), KioskState.OFFLINE),
+    ],
+)
+def test_interrupted_tap_rests_and_ignores_the_late_reply(event: Event, resting) -> None:
+    state, ctx, _ = start()
+    state, ctx, effects = handle(state, ctx, event)
+    assert state == resting
+    assert ctx.result is None
+    assert effects == [CancelTimeout(1, TimeoutName.TAP)]
+    for late in (GatekeeperResult(1, Result.CHECKED_IN), GatekeeperError(1)):
+        assert handle(state, ctx, late) == (state, ctx, [])
+
+
+def test_conflicting_or_duplicate_reads_while_checking_are_ignored() -> None:
+    state, ctx, _ = start()
+    for event in (
+        CardRead(1, UID, STUDENT),
+        CardRead(1, "0002ABCD", "000000002"),
+        CardRead(2, UID, STUDENT),
+        BadScan(1, "mixed"),
+    ):
+        assert handle(state, ctx, event) == (state, ctx, [])
 
 
 def test_cancel_a_start_b_then_delayed_a_events_cannot_affect_b() -> None:
-    state, ctx, _ = awaiting_identity()
+    state, ctx, _ = start()
     state, ctx, _ = handle(state, ctx, CancelSession(1))
-    assert state == KioskState.IDLE
-    assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
-    assert ctx.session_id == 1
-    assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
-    state, ctx, _ = handle(state, ctx, CardRead(2, "0002ABCD", "000000001"))
+    assert (state, ctx.tap_id) == (KioskState.IDLE, 1)
+    assert handle(state, ctx, CardRead(1, UID, STUDENT)) == (state, ctx, [])
+    state, ctx, _ = handle(state, ctx, CardRead(2, "0002ABCD", STUDENT))
     for event in (
-        IDENTITY,
-        CardRead(1, UID, "000000001"),
-        BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT),
-        BackendError(1, BackendOp.ACTIVATE_UID),
-        Timeout(1, TimeoutName.SESSION),
+        CardRead(1, UID, STUDENT),
+        GatekeeperResult(1, Result.CHECKED_OUT),
+        GatekeeperError(1),
+        Timeout(1, TimeoutName.TAP),
         CancelSession(1),
         ReaderFault(1, "old failure"),
         ReaderReady(1),
@@ -285,101 +190,16 @@ def test_cancel_a_start_b_then_delayed_a_events_cannot_affect_b() -> None:
         assert handle(state, ctx, event) == (state, ctx, [])
 
 
-@pytest.mark.parametrize("op", list(BackendOp))
-@pytest.mark.parametrize(
-    "event",
-    [
-        CancelSession(1),
-        Timeout(1, TimeoutName.SESSION),
-        BadScan(1, "ambiguous presentation"),
-        ReaderFault(1, "field-off timeout"),
-        BackendOffline(),
-        IdentityConfirmed(1, "0002ABCD", STUDENT),
-    ],
-)
-def test_interrupted_write_holds_until_authoritative_outcome(op: BackendOp, event: Event) -> None:
-    state, ctx, _ = waiting_for(op)
-    state, ctx, effects = handle(state, ctx, event)
-    assert state == KioskState.OUTCOME_UNKNOWN
-    assert ctx.pending_op == op
-    assert ctx.uid is ctx.confirmed_student_number is ctx.outcome is None
-    assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
-    assert handle(state, ctx, CardRead(2, UID, "000000001")) == (state, ctx, [])
-    # Health recovery alone cannot resolve an outstanding write.
-    for health in (BackendOnline(), ReaderReady(1)):
-        state, ctx, effects = handle(state, ctx, health)
-        assert state == KioskState.OUTCOME_UNKNOWN
-        assert effects == []
-    result = Outcome.CHECKED_OUT if op == BackendOp.ACTIVATE_UID else Outcome.REPLACED_AND_ACTIVE
-    state, ctx, effects = handle(state, ctx, BackendResult(1, op, result))
-    assert state == KioskState.IDLE
-    assert ctx.pending_op is ctx.outcome is None  # Never show the departed student's success.
-    assert effects == []
-
-
-@pytest.mark.parametrize("op", list(BackendOp))
-@pytest.mark.parametrize("kind", list(FailureKind))
-def test_backend_failure_distinguishes_not_sent_from_unknown(
-    op: BackendOp, kind: FailureKind
+@pytest.mark.parametrize("gatekeeper_first", [True, False])
+def test_recovery_requires_both_health_flags_and_noise_cannot_bypass_offline(
+    gatekeeper_first: bool,
 ) -> None:
-    state, ctx, _ = waiting_for(op)
-    state, ctx, _ = handle(state, ctx, BackendError(1, op, kind))
-    assert not ctx.backend_online
-    assert ctx.uid is ctx.confirmed_student_number is ctx.outcome is None
-    if kind == FailureKind.NOT_SENT:
-        assert state == KioskState.OFFLINE
-        assert ctx.pending_op is None
-        state, ctx, _ = handle(state, ctx, BackendOnline())
-        assert state == KioskState.IDLE
-    else:
-        assert state == KioskState.OUTCOME_UNKNOWN
-        assert ctx.pending_op == op
-        state, ctx, _ = handle(state, ctx, BackendOnline())
-        assert state == KioskState.OUTCOME_UNKNOWN
-
-
-def test_cancelled_activation_unregistered_reply_does_not_continue_registration() -> None:
-    state, ctx, _ = start()
-    state, ctx, _ = handle(state, ctx, IDENTITY)
-    state, ctx, _ = handle(state, ctx, CancelSession(1))
-    state, ctx, effects = handle(
-        state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)
-    )
-    assert state == KioskState.IDLE
-    assert ctx.pending_op is ctx.outcome is None
-    assert effects == []
-
-
-@pytest.mark.parametrize(
-    ("op", "outcome"),
-    [
-        (BackendOp.ACTIVATE_UID, Outcome.REGISTERED_AND_ACTIVE),
-        # Check-out runs no eligibility check, so these can't be its answer.
-        (BackendOp.ACTIVATE_UID, Outcome.UNKNOWN_STUDENT),
-        (BackendOp.ACTIVATE_UID, Outcome.MISSING_INDUCTION),
-        (BackendOp.REGISTER_AND_ACTIVATE, Outcome.CHECKED_OUT),
-        (BackendOp.REGISTER_AND_ACTIVATE, Outcome.UNREGISTERED),
-        (BackendOp.ACTIVATE_UID, Outcome.READ_AGAIN),
-    ],
-)
-def test_wrong_response_shape_cannot_claim_success_or_assume_rollback(
-    op: BackendOp, outcome: Outcome
-) -> None:
-    state, ctx, _ = waiting_for(op)
-    state, ctx, _ = handle(state, ctx, BackendResult(1, op, outcome))
-    assert state == KioskState.OUTCOME_UNKNOWN
-    assert ctx.pending_op == op
-    assert ctx.outcome is None
-
-
-@pytest.mark.parametrize("backend_first", [True, False])
-def test_recovery_requires_both_health_flags_and_noise_cannot_bypass_offline(backend_first: bool):
-    state, ctx, _ = handle(KioskState.IDLE, READY, BackendOffline())
+    state, ctx, _ = handle(KioskState.IDLE, READY, GatekeeperOffline())
     state, ctx, _ = handle(state, ctx, ReaderFault(0, "field-on timeout"))
     for event in (BadScan(0, "bad input"), Timeout(0, TimeoutName.RESULT), CancelSession(0)):
         assert handle(state, ctx, event) == (state, ctx, [])
-    events = [BackendOnline(), ReaderReady(0)]
-    if not backend_first:
+    events = [GatekeeperOnline(), ReaderReady(0)]
+    if not gatekeeper_first:
         events.reverse()
     state, ctx, _ = handle(state, ctx, events[0])
     assert state != KioskState.IDLE
@@ -387,26 +207,12 @@ def test_recovery_requires_both_health_flags_and_noise_cannot_bypass_offline(bac
     assert state == KioskState.IDLE
 
 
-def test_reader_fault_during_write_survives_backend_resolution() -> None:
+def test_result_screen_and_old_timer_cannot_restore_idle_after_gatekeeper_loss() -> None:
     state, ctx, _ = start()
-    state, ctx, _ = handle(state, ctx, ReaderFault(1, "field command failed"))
-    state, ctx, _ = handle(
-        state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)
-    )
-    assert state == KioskState.READER_ERROR
-    assert ctx.outcome is None
-    assert handle(state, ctx, CardRead(2, UID, "000000001")) == (state, ctx, [])
-    state, ctx, _ = handle(state, ctx, ReaderReady(1))
-    assert state == KioskState.IDLE
-
-
-def test_result_screen_and_old_timer_cannot_restore_idle_after_backend_loss() -> None:
-    state, ctx, _ = start()
-    state, ctx, _ = handle(
-        state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)
-    )
-    assert handle(state, ctx, Timeout(1, TimeoutName.SESSION)) == (state, ctx, [])
-    state, ctx, _ = handle(state, ctx, BackendOffline())
+    state, ctx, _ = handle(state, ctx, GatekeeperResult(1, Result.CHECKED_OUT))
+    assert handle(state, ctx, Timeout(1, TimeoutName.TAP)) == (state, ctx, [])
+    state, ctx, effects = handle(state, ctx, GatekeeperOffline())
     assert state == KioskState.OFFLINE
-    assert ctx.outcome is None
+    assert ctx.result is None
+    assert effects == [CancelTimeout(1, TimeoutName.RESULT)]
     assert handle(state, ctx, Timeout(1, TimeoutName.RESULT)) == (state, ctx, [])

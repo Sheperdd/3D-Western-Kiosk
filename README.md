@@ -64,7 +64,7 @@ Run `python -m kiosk` and open both pages on the kiosk computer:
 - Student display: <http://127.0.0.1:8000/?display=1>
 - Public guidance: <http://127.0.0.1:8000/?display=2>
 
-The desktop demo waits 10 seconds after starting the web server before sending one simulated card scan, leaving the ready screen visible during the pause. Both desktop and hardware demos default to successful simulated activation; choosing readers does not select a backend outcome. Registration and failure scenarios are exercised explicitly in the tests. Keep the pages open and restart the process to replay the desktop scan; refreshing a page does not restart the interaction. The displays poll every 250 ms and recover automatically after a connection failure. Python owns state transitions and result durations: success/assistance 10 seconds, signup/training 30 seconds, retry 6 seconds. Activation simulates 2.5 seconds of backend latency; there is no guaranteed minimum visible checking time.
+The desktop demo sends a simulated check-in 10 seconds after starting the web server and a check-out at 30 seconds. The fake backend keeps visits in memory until the process exits. Hardware mode uses the same fake backend but never confirms same-card identity: a fresh card reaches `AWAITING_IDENTITY`, then `SESSION_EXPIRED`, without registration. Registration and failure scenarios are exercised explicitly in the tests. Keep the pages open and restart the process to replay the desktop sequence; refreshing a page does not restart the interaction. The displays poll every 250 ms and recover automatically after a connection failure. Python owns state transitions and result durations: check-in/assistance 10 seconds, signup/training 30 seconds, check-out/retry 6 seconds. Activation simulates 2.5 seconds of backend latency; there is no guaranteed minimum visible checking time.
 
 Every controller state and final outcome has student-facing copy. The public display only shows general guidance and availability. Neither displays student identifiers. Success screens show unavailable training/machine details until the backend supplies them. Signup and induction screens have clearly labelled, non-scannable placeholders until approved URLs are available. All screens are visibly marked as a demo.
 
@@ -129,7 +129,7 @@ sudo dmesg -w                      # live kernel log while plugging/unplugging U
 
 ### Running the kiosk and diagnostics
 
-**Once `kiosk.service` is installed, run `sudo systemctl stop kiosk` before any command in this block, and `sudo systemctl start kiosk` when done.** Only one process can hold port 8000 and the readers. A manual `python -m kiosk` just fails with "address already in use", but the probe sends PN532 commands before it notices the OMNIKEY is taken, which can break the service's read in progress. `pkill` does not stop the service either: systemd restarts it five seconds later.
+**Once `kiosk.service` is installed, run `sudo systemctl stop kiosk` before any command in this block, and `sudo systemctl start kiosk` when done.** Only one process can hold port 8000 and the readers. A second kiosk run fails with "address already in use"; the reader probe rejects an OMNIKEY already held by the service before initializing the PN532. `pkill` does not stop the service either: systemd restarts it five seconds later.
 
 ```sh
 python -u -m tools.student_number_probe /dev/input/eventX   # readers only, no backend

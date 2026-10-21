@@ -1,7 +1,7 @@
-"""Internal kiosk vocabulary, not an agreed backend/network schema.
+"""Internal kiosk vocabulary. Gatekeeper results reuse the wire strings from docs/kiosk-api.md.
 
 The controller executes effects and supplies facts. It owns reader validation,
-same-card assurance, readiness checks, and timer durations; handle() performs no I/O.
+readiness checks, the gatekeeper HTTP call, and timer durations; handle() performs no I/O.
 """
 
 from dataclasses import dataclass
@@ -10,40 +10,30 @@ from enum import StrEnum
 
 class KioskState(StrEnum):
     IDLE = "idle"
-    ACTIVATING = "activating"
-    AWAITING_IDENTITY = "awaiting_identity"
-    REGISTERING = "registering"
+    CHECKING = "checking"
     RESULT = "result"
     OFFLINE = "offline"
     READER_ERROR = "reader_error"
-    OUTCOME_UNKNOWN = "outcome_unknown"
 
 
-class BackendOp(StrEnum):
-    ACTIVATE_UID = "activate_uid"
-    REGISTER_AND_ACTIVATE = "register_and_activate"
-
-
-class Outcome(StrEnum):
-    CHECKED_OUT = "checked_out"
-    UNREGISTERED = "unregistered"  # Routing only; this is not an unknown student.
-    REGISTERED_AND_ACTIVE = "registered_and_active"
-    REPLACED_AND_ACTIVE = "replaced_and_active"
-    UNKNOWN_STUDENT = "unknown_student"  # Display 1: account-signup QR.
-    MISSING_INDUCTION = "missing_induction"  # Display 1: training-signup QR.
-    DENIED = "denied"
-    UID_CONFLICT = "uid_conflict"
-    READ_AGAIN = "read_again"  # Local feedback, never a backend response.
-    SESSION_EXPIRED = "session_expired"  # Local feedback, never a backend response.
+class Result(StrEnum):
+    CHECKED_IN = "CHECKED_IN"
+    CHECKED_OUT = "CHECKED_OUT"
+    DENIED = "DENIED"
+    IGNORED_DUPLICATE = "IGNORED_DUPLICATE"  # Repeats the previous answer; render it again.
+    READ_AGAIN = "READ_AGAIN"  # Local feedback, never a gatekeeper response.
+    UNREACHABLE = "UNREACHABLE"  # Local feedback, never a gatekeeper response.
+    NOT_SET_UP = "NOT_SET_UP"  # Local feedback, never a gatekeeper response.
 
 
 class FailureKind(StrEnum):
-    NOT_SENT = "not_sent"  # Only when the controller knows no request was sent.
-    UNKNOWN = "unknown"  # Includes lost responses and possible partial writes.
+    UNREACHABLE = "unreachable"  # Timeout or network error, after the one contract retry.
+    BAD_REQUEST = "bad_request"  # 422: malformed body, usually a bad card read.
+    BAD_KEY = "bad_key"  # 401: missing, wrong or rotated device key.
 
 
 class TimeoutName(StrEnum):
-    SESSION = "session"
+    TAP = "tap"
     RESULT = "result"
 
 
@@ -51,71 +41,53 @@ class TimeoutName(StrEnum):
 class CardRead:
     """Both observed identifiers, after UID capture and acknowledged RF handover.
 
-    Allocate increasing session IDs only when IDLE and ready; never reuse an ID.
-    Further reads from that presentation retain its ID, including conflicting reads.
+    Allocate increasing tap IDs only when IDLE and ready; never reuse an ID.
     This is NOT proof that the identifiers belong to the same physical card.
     """
 
-    session_id: int
-    uid: str
-    student_number: str
-
-
-@dataclass(frozen=True)
-class IdentityConfirmed:
-    """The controller has established that BOTH identifiers belong to one card.
-
-    A shared session ID or a short time window is not sufficient evidence. Real
-    hardware must not emit this until the same-card mechanism has been validated.
-    """
-
-    session_id: int
+    tap_id: int
     uid: str
     student_number: str
 
 
 @dataclass(frozen=True)
 class BadScan:
-    """The current attempt is incomplete or ambiguous; no new session ID is allocated."""
+    """The current attempt is incomplete or ambiguous; no new tap ID is allocated."""
 
-    session_id: int
+    tap_id: int
     reason: str
 
 
 @dataclass(frozen=True)
 class CancelSession:
-    session_id: int
+    tap_id: int
 
 
 @dataclass(frozen=True)
-class BackendResult:
-    """An authoritative result for the original (session_id, op) operation.
+class GatekeeperResult:
+    """The gatekeeper's answer to a tap. reason stays a raw code: unknown codes must not crash."""
 
-    Success includes current eligibility and activation. Replacement success also
-    includes invalidation of the old UID. Denials and UNREGISTERED imply no write.
-    reason is a backend reason code; the approved display mapping is still open.
-    """
-
-    session_id: int
-    op: BackendOp
-    outcome: Outcome
+    tap_id: int
+    result: Result
     reason: str | None = None
+    message: str | None = None
+    notices: tuple[str, ...] = ()
+    first_name: str | None = None
 
 
 @dataclass(frozen=True)
-class BackendError:
-    session_id: int
-    op: BackendOp
-    kind: FailureKind = FailureKind.UNKNOWN
+class GatekeeperError:
+    tap_id: int
+    kind: FailureKind = FailureKind.UNREACHABLE
 
 
 @dataclass(frozen=True)
-class BackendOnline:
+class GatekeeperOnline:
     pass
 
 
 @dataclass(frozen=True)
-class BackendOffline:
+class GatekeeperOffline:
     pass
 
 
@@ -123,30 +95,29 @@ class BackendOffline:
 class ReaderReady:
     """Current reader readiness has been verified, including after any recovery."""
 
-    session_id: int
+    tap_id: int
 
 
 @dataclass(frozen=True)
 class ReaderFault:
-    session_id: int
+    tap_id: int
     reason: str
 
 
 @dataclass(frozen=True)
 class Timeout:
-    session_id: int
+    tap_id: int
     name: TimeoutName
 
 
 Event = (
     CardRead
-    | IdentityConfirmed
     | BadScan
     | CancelSession
-    | BackendResult
-    | BackendError
-    | BackendOnline
-    | BackendOffline
+    | GatekeeperResult
+    | GatekeeperError
+    | GatekeeperOnline
+    | GatekeeperOffline
     | ReaderReady
     | ReaderFault
     | Timeout
@@ -154,33 +125,24 @@ Event = (
 
 
 @dataclass(frozen=True)
-class ActivateUid:
-    """The tap: the backend checks out an active visit, or answers UNREGISTERED."""
+class Tap:
+    """POST /v1/kiosk/tap: the gatekeeper checks in or out by student number."""
 
-    session_id: int
-    uid: str
-    student_number: str
-
-
-@dataclass(frozen=True)
-class RegisterAndActivate:
-    """One logical operation; the backend decides new registration versus replacement."""
-
-    session_id: int
+    tap_id: int
     uid: str
     student_number: str
 
 
 @dataclass(frozen=True)
 class StartTimeout:
-    session_id: int
+    tap_id: int
     name: TimeoutName
 
 
 @dataclass(frozen=True)
 class CancelTimeout:
-    session_id: int
+    tap_id: int
     name: TimeoutName
 
 
-Effect = ActivateUid | RegisterAndActivate | StartTimeout | CancelTimeout
+Effect = Tap | StartTimeout | CancelTimeout

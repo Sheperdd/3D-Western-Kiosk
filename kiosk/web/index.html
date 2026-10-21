@@ -31,6 +31,7 @@
       .eyebrow { color: var(--accent); font-size: 14px; font-weight: 750; letter-spacing: 2px; text-transform: uppercase; margin: 0 0 14px; }
       h1 { font-size: clamp(34px, 4vw, 60px); line-height: 1.08; letter-spacing: -1.5px; margin: 0; max-width: 850px; text-wrap: balance; }
       .message { font-size: clamp(20px, 2vw, 27px); line-height: 1.5; color: var(--muted); margin: 24px 0 28px; max-width: 800px; }
+      .notices { white-space: pre-line; width: 100%; margin: -8px 0 28px; padding: 16px 20px; border-left: 4px solid var(--accent); border-radius: 4px; background: var(--tint); font-size: 19px; line-height: 1.5; }
       .next-step { border-top: 1px solid #e9e4ef; padding-top: 20px; margin: auto 0 0; width: 100%; font-size: 17px; line-height: 1.5; color: var(--muted); }
       .side-note { background: #e9e2f1; padding: 30px 26px; border-radius: 20px; }
       .side-note h2 { font-size: 27px; line-height: 1.2; color: #4f2683; margin: 0 0 28px; }
@@ -107,7 +108,7 @@
     <div class="shell">
       <header>
         <div class="brand"><div class="brand-mark" aria-hidden="true">3D</div><div><div class="brand-name">3D Western</div><div class="brand-subtitle">Makerspace · Student access</div></div></div>
-        <div class="demo">Demo — no real access changes</div>
+        <div id="demo-badge" class="demo" hidden>Demo — no real access changes</div>
       </header>
       <noscript><p>This display needs JavaScript. Please contact the makerspace team.</p></noscript>
       <main>
@@ -117,13 +118,14 @@
             <p id="eyebrow" class="eyebrow">Please wait</p>
             <h1 id="screen">Starting kiosk</h1>
             <p id="message" class="message">Please wait while the kiosk gets ready.</p>
+            <p id="notices" class="notices" hidden></p>
             <div id="access-details" class="access-details" hidden>
               <section class="detail"><h2>Your training level</h2><p>Training level unavailable</p></section>
               <section class="detail"><h2>Machines you can access</h2><p>Machine access details unavailable</p></section>
             </div>
             <section id="qr-panel" class="qr-panel" hidden>
               <div class="qr-placeholder" aria-hidden="true">QR<br/>not available</div>
-              <div><h2 id="qr-title">Signup information</h2><p>Signup link not available in this demo. Contact the makerspace team for help.</p></div>
+              <div><h2 id="qr-title">Signup information</h2><p>QR link not set up yet. Contact the makerspace team for help.</p></div>
             </section>
             <p id="next-step" class="next-step">This screen updates automatically.</p>
           </div>

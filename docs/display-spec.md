@@ -1,6 +1,14 @@
 # Kiosk display content
 
-**Update, 2026-10-20:** tap-out ([ADR-0006](adr/0006-tap-out-and-daily-registration.md)). The tables below show the **target** copy: check in or out, a `CHECKED_OUT` result, `REGISTERED_AND_ACTIVE` as the everyday check-in, and no `ACTIVATED`/`ALREADY_ACTIVE`. `kiosk/web/app.js` has not been updated yet.
+**Gatekeeper update, 2026-10-21:** display 1 now shows gatekeeper answers ([kiosk-api.md](kiosk-api.md)). Where the tables below disagree, this note wins.
+
+- `/api/display/1` sends `{state, result, reason, message, notices}`. It sends no name, student number or UID; the gatekeeper's `message` carries the greeting.
+- States: `CHECKING` replaces `ACTIVATING`, `AWAITING_IDENTITY` and `REGISTERING`; `OUTCOME_UNKNOWN` is gone. A lost reply shows `UNREACHABLE` ("Couldn't reach the system") and never claims either outcome.
+- Gatekeeper results (`CHECKED_IN`, `CHECKED_OUT`, `DENIED`, `IGNORED_DUPLICATE`) keep a fixed heading. The gatekeeper's `message` is the supporting text and `notices` are listed under it, rendered as text only. The backend owns that wording, which replaces the "no arbitrary backend text" rule below.
+- QR codes follow `reason`: `UNKNOWN_STUDENT` gives signup and `ORIENTATION_REQUIRED` gives orientation. Any other reason gets no QR.
+- Local results keep fixed wording: `READ_AGAIN`, `UNREACHABLE`, and `NOT_SET_UP` (bad kiosk key).
+
+**Update, 2026-10-21:** the dummy displays implement tap-out ([ADR-0006](adr/0006-tap-out-and-daily-registration.md)): check in or out, a `CHECKED_OUT` result, `REGISTERED_AND_ACTIVE` as the everyday check-in, and no `ACTIVATED`/`ALREADY_ACTIVE`. Check-out feedback lasts 6 seconds and shows no access details. The tables still include proposed backend-provided details and QR links; the current demo labels these unavailable.
 
 **Implementation update, 2026-10-13:** Both dummy displays render state/outcome messages, public guidance, and connection failures. They show readiness only after reader cleanup and rearming. Success/assistance, QR, and retry result durations are 10, 30, and 6 seconds respectively, owned by the controller. The minimum-display-time proposal below is deferred: the prototype simulates a 2.5-second activation response and keeps registration fast. It publishes results immediately. Training/machine details remain unavailable and QR destinations remain non-scannable placeholders.
 

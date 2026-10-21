@@ -133,18 +133,15 @@ def open_readers(device_path: str):
     from digitalio import DigitalInOut
     from evdev import InputDevice
 
-    with (
-        closing(InputDevice(device_path)) as device,
-        board.SPI() as spi,
-        DigitalInOut(board.D5) as cs,
-    ):
-        reader = PN532_SPI(spi, cs)
-        try:
-            reader.SAM_configuration()
-            set_rf_field(reader, False)
-            if "OMNIKEY" not in device.name.upper():
-                raise ValueError(f"{device_path} is {device.name!r}, not an OMNIKEY reader")
-            with device.grab_context():
+    with closing(InputDevice(device_path)) as device:
+        if "OMNIKEY" not in device.name.upper():
+            raise ValueError(f"{device_path} is {device.name!r}, not an OMNIKEY reader")
+        # Claim the input device before PN532 setup can disrupt another reader session.
+        with device.grab_context(), board.SPI() as spi, DigitalInOut(board.D5) as cs:
+            reader = PN532_SPI(spi, cs)
+            try:
+                reader.SAM_configuration()
+                set_rf_field(reader, False)
                 yield reader, device
-        finally:
-            set_rf_field(reader, False)
+            finally:
+                set_rf_field(reader, False)

@@ -1,24 +1,21 @@
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from kiosk.events import (
-    ActivateUid,
-    BackendError,
-    BackendOp,
-    BackendResult,
     BadScan,
     CancelSession,
     CancelTimeout,
     CardRead,
     Effect,
     Event,
-    FailureKind,
+    GatekeeperError,
+    GatekeeperResult,
     KioskState,
-    Outcome,
     ReaderFault,
-    RegisterAndActivate,
+    Result,
     StartTimeout,
+    Tap,
     Timeout,
     TimeoutName,
 )
@@ -28,85 +25,53 @@ from kiosk.readers import read_card_async
 
 async def fire_timeout(queue: asyncio.Queue[Event], effect: StartTimeout, seconds: float) -> None:
     await asyncio.sleep(seconds)
-    timeout_event = Timeout(effect.session_id, effect.name)
-    await queue.put(timeout_event)
+    await queue.put(Timeout(effect.tap_id, effect.name))
 
 
-# ponytail: in-memory demo visits; lost on restart, which the real ops backend replaces.
+type TapSender = Callable[[Tap], Awaitable[GatekeeperResult | GatekeeperError]]
+
+# Demo gatekeeper for running without GK_URL; visits live in memory only.
 DEMO_CHECKED_IN: set[str] = set()
+DEMO_TAP_DELAY = 2.5
 
 
-async def fake_activate_uid(
-    queue: asyncio.Queue[Event],
-    effect: ActivateUid,
-    seconds: float,
-    desired_outcome: Outcome | None = None,
-) -> None:
-    """Without desired_outcome, toggle like ops: check out a checked-in UID, else UNREGISTERED."""
+async def fake_tap(tap: Tap) -> GatekeeperResult:
+    """Toggle like the gatekeeper: check out a checked-in UID, else check in."""
+    await asyncio.sleep(DEMO_TAP_DELAY)
+    if tap.uid in DEMO_CHECKED_IN:
+        DEMO_CHECKED_IN.discard(tap.uid)
+        return GatekeeperResult(tap.tap_id, Result.CHECKED_OUT)
+    DEMO_CHECKED_IN.add(tap.uid)
+    return GatekeeperResult(tap.tap_id, Result.CHECKED_IN)
+
+
+async def deliver_tap(queue: asyncio.Queue[Event], send_tap: TapSender, tap: Tap) -> None:
     try:
-        if desired_outcome is None:
-            if effect.uid in DEMO_CHECKED_IN:
-                DEMO_CHECKED_IN.discard(effect.uid)
-                desired_outcome = Outcome.CHECKED_OUT
-            else:
-                desired_outcome = Outcome.UNREGISTERED
-        await asyncio.sleep(seconds)
-        await queue.put(BackendResult(effect.session_id, BackendOp.ACTIVATE_UID, desired_outcome))
-    except Exception as e:
-        logging.exception("Activation request failed with exception: %s", e)
-        await queue.put(
-            BackendError(effect.session_id, BackendOp.ACTIVATE_UID, FailureKind.UNKNOWN)
-        )
+        event = await send_tap(tap)
+    except Exception:
+        logging.exception("Tap request failed")
+        event = GatekeeperError(tap.tap_id)
+    await queue.put(event)
 
 
-async def fake_register_and_activate(
-    queue: asyncio.Queue[Event],
-    effect: RegisterAndActivate,
-    seconds: float,
-    failure: FailureKind | None = None,
-) -> None:
-    try:
-        await asyncio.sleep(seconds)
-
-        if failure is not None:
-            await queue.put(
-                BackendError(effect.session_id, BackendOp.REGISTER_AND_ACTIVATE, failure)
-            )
-        else:
-            DEMO_CHECKED_IN.add(effect.uid)
-            await queue.put(
-                BackendResult(
-                    effect.session_id,
-                    BackendOp.REGISTER_AND_ACTIVATE,
-                    Outcome.REGISTERED_AND_ACTIVE,
-                )
-            )
-    except Exception as e:
-        logging.exception("Registration request failed with exception: %s", e)
-        await queue.put(
-            BackendError(effect.session_id, BackendOp.REGISTER_AND_ACTIVATE, FailureKind.UNKNOWN)
-        )
-
-
-# Simulated backend settings for both reader modes; production durations need agreement.
-DEMO_TIMEOUT_SECONDS: dict[TimeoutName, float] = {
-    TimeoutName.SESSION: 10.0,
+TIMEOUT_SECONDS: dict[TimeoutName, float] = {
+    # Must exceed send_tap's worst case (2 attempts x 2 s ClientTimeout), or a late successful
+    # retry is ignored and the student's next tap toggles them back.
+    TimeoutName.TAP: 5.0,
 }
-DEMO_ACTIVATION_DELAY = 2.5
-DEMO_REGISTRATION_DELAY = 0.001
 STUDENT_NUMBER_TIMEOUT = 10.0  # After UID/RF handover; waiting for a card has no deadline.
 
 # Timers for the displays
-RESULT_DURATION_SECONDS: dict[Outcome, float] = {
-    Outcome.CHECKED_OUT: 6.0,  # Proposed; tune on the real monitor.
-    Outcome.REGISTERED_AND_ACTIVE: 10.0,
-    Outcome.REPLACED_AND_ACTIVE: 10.0,
-    Outcome.UNKNOWN_STUDENT: 30.0,
-    Outcome.MISSING_INDUCTION: 30.0,
-    Outcome.DENIED: 10.0,
-    Outcome.UID_CONFLICT: 10.0,
-    Outcome.READ_AGAIN: 6.0,
-    Outcome.SESSION_EXPIRED: 6.0,
+RESULT_DURATION_SECONDS: dict[Result, float] = {
+    Result.CHECKED_IN: 10.0,  # Proposed; tune on the real monitor.
+    Result.CHECKED_OUT: 6.0,
+    # ponytail: one duration for every denial; the signup/orientation QRs need scan time.
+    # Key by reason if 30 s blocks the queue for denials without a QR.
+    Result.DENIED: 30.0,
+    Result.IGNORED_DUPLICATE: 6.0,
+    Result.READ_AGAIN: 6.0,
+    Result.UNREACHABLE: 6.0,
+    Result.NOT_SET_UP: 10.0,
 }
 
 
@@ -116,38 +81,33 @@ def dispatch(
     timers: dict[tuple[int, TimeoutName], asyncio.Task[None]],
     background_tasks: set[asyncio.Task[None]],
     *,
-    outcome: Outcome | None = None,
+    result: Result | None = None,
+    send_tap: TapSender = fake_tap,
 ) -> None:
+    task: asyncio.Task[None] | None = None
     if isinstance(effect, StartTimeout):
         if effect.name == TimeoutName.RESULT:
-            if outcome is None:
-                raise ValueError("Result timer requires an outcome")
-            seconds = RESULT_DURATION_SECONDS[outcome]
+            if result is None:
+                raise ValueError("Result timer requires a result")
+            seconds = RESULT_DURATION_SECONDS[result]
         else:
-            seconds = DEMO_TIMEOUT_SECONDS[effect.name]
-        if (effect.session_id, effect.name) in timers:
-            timers[(effect.session_id, effect.name)].cancel()
-        timer = asyncio.create_task(fire_timeout(queue, effect, seconds))
-        timers[(effect.session_id, effect.name)] = timer
-        background_tasks.add(timer)
-        timer.add_done_callback(background_tasks.discard)
+            seconds = TIMEOUT_SECONDS[effect.name]
+        if (effect.tap_id, effect.name) in timers:
+            timers[(effect.tap_id, effect.name)].cancel()
+        task = asyncio.create_task(fire_timeout(queue, effect, seconds))
+        timers[(effect.tap_id, effect.name)] = task
 
     elif isinstance(effect, CancelTimeout):
-        if (effect.session_id, effect.name) in timers:
-            timers[(effect.session_id, effect.name)].cancel()
-            del timers[(effect.session_id, effect.name)]
+        timer = timers.pop((effect.tap_id, effect.name), None)
+        if timer is not None:
+            timer.cancel()
 
-    elif isinstance(effect, ActivateUid):
-        backend_task = asyncio.create_task(fake_activate_uid(queue, effect, DEMO_ACTIVATION_DELAY))
-        background_tasks.add(backend_task)
-        backend_task.add_done_callback(background_tasks.discard)
+    elif isinstance(effect, Tap):
+        task = asyncio.create_task(deliver_tap(queue, send_tap, effect))
 
-    elif isinstance(effect, RegisterAndActivate):
-        backend_task = asyncio.create_task(
-            fake_register_and_activate(queue, effect, DEMO_REGISTRATION_DELAY)
-        )
-        background_tasks.add(backend_task)
-        backend_task.add_done_callback(background_tasks.discard)
+    if task is not None:
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
 
     print(type(effect).__name__)
 
@@ -158,16 +118,15 @@ async def run(
     hardware_mode: bool = False,
     uid_reader=None,
     student_reader=None,
-    on_state_change: Callable[[KioskState, Outcome | None, bool], None] | None = None,
+    on_state_change: Callable[[KioskState, Context, bool], None] | None = None,
+    send_tap: TapSender = fake_tap,
 ) -> None:
     if hardware_mode and (uid_reader is None or student_reader is None):
         raise ValueError("Hardware mode requires both uid_reader and student_reader")
 
     state = KioskState.OFFLINE
     context = Context()
-    timers: dict[
-        tuple[int, TimeoutName], asyncio.Task[None]
-    ] = {}  # session_id, timeout_name -> task
+    timers: dict[tuple[int, TimeoutName], asyncio.Task[None]] = {}  # tap_id, timeout_name -> task
     background_tasks: set[asyncio.Task[None]] = set()
     acquisition_task: asyncio.Task[None] | None = None
     acquired_scan: CardRead | BadScan | ReaderFault | None = None
@@ -176,7 +135,7 @@ async def run(
 
     async def acquire_card() -> None:
         nonlocal acquired_scan
-        session_id = context.session_id
+        tap_id = context.tap_id
         try:
             pair = await read_card_async(
                 uid_reader, student_reader, student_timeout=STUDENT_NUMBER_TIMEOUT
@@ -185,25 +144,25 @@ async def run(
                 admission_revoked
                 or state != KioskState.IDLE
                 or not context.reader_ready
-                or not context.backend_online
-                or context.session_id != session_id
+                or not context.gatekeeper_online
+                or context.tap_id != tap_id
             ):
                 return
             if pair is None:
                 reason = "Incomplete scan: student number missing. Remove the card and try again."
                 print(reason)
-                acquired_scan = BadScan(session_id, reason)
+                acquired_scan = BadScan(tap_id, reason)
             else:
-                acquired_scan = CardRead(session_id + 1, *pair)
+                acquired_scan = CardRead(tap_id + 1, *pair)
             queue.put_nowait(acquired_scan)
         except Exception as error:
             logging.exception("Card acquisition failed")
-            acquired_scan = ReaderFault(context.session_id, str(error))
+            acquired_scan = ReaderFault(context.tap_id, str(error))
             queue.put_nowait(acquired_scan)
 
     try:
         if on_state_change is not None:
-            on_state_change(state, context.outcome, False)
+            on_state_change(state, context, False)
 
         while True:
             if next_event is None:
@@ -224,37 +183,35 @@ async def run(
                     if (
                         (acquisition_task is not None or acquired_scan is not None)
                         and isinstance(event, CancelSession)
-                        and event.session_id == context.session_id
+                        and event.tap_id == context.tap_id
                     ):
                         admission_revoked = True
                     print("Processing event:", type(event).__name__)
 
                     state, context, effects = handle(state, context, event)
 
-                    print("State: ", state.name, "Outcome: ", context.outcome)
+                    print("State: ", state.name, "Result: ", context.result)
                     for effect in effects:
                         dispatch(
                             queue,
                             effect,
                             timers,
                             background_tasks,
-                            outcome=context.outcome,
+                            result=context.result,
+                            send_tap=send_tap,
                         )
 
                     if (
                         hardware_mode
                         and isinstance(event, ReaderFault)
-                        and context.pending_op is None
+                        and event.tap_id == context.tap_id
                     ):
                         raise RuntimeError(f"Reader fault: {event.reason}")
 
             ready_for_card = state == KioskState.IDLE
             if hardware_mode:
                 ready = (
-                    state == KioskState.IDLE
-                    and context.reader_ready
-                    and context.backend_online
-                    and context.pending_op is None
+                    state == KioskState.IDLE and context.reader_ready and context.gatekeeper_online
                 )
                 if not ready:
                     admission_revoked = True
@@ -272,7 +229,7 @@ async def run(
                     acquisition_task.add_done_callback(background_tasks.discard)
                 ready_for_card = ready and acquisition_task is not None and not admission_revoked
             if on_state_change is not None:
-                on_state_change(state, context.outcome, ready_for_card)
+                on_state_change(state, context, ready_for_card)
     finally:
         admission_revoked = True
         background_snapshot = list(background_tasks)

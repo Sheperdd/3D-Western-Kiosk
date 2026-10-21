@@ -1,14 +1,16 @@
 # Student-card kiosk — Requirements and SDLC plan
 
-**Update, 2026-10-20:** tap-out and daily registration ([ADR-0006](adr/0006-tap-out-and-daily-registration.md)). R4, R5, R6, and R8 and their acceptance rows are rewritten. The kiosk code changes for this are **pending**: the section 7 transition table describes the target, and the current code still returns `ACTIVATED`/`ALREADY_ACTIVE`.
+**Update, 2026-10-21 (gatekeeper):** the kiosk now talks to the access gatekeeper on the makerspace PC with one tap call ([ADR-0007](adr/0007-kiosk-talks-to-gatekeeper.md), [kiosk-api.md](kiosk-api.md)). Sections 1-3 and 5 are rewritten for it. Section 7 still describes the pre-gatekeeper core and is replaced in phase 2 of the [integration plan](gatekeeper-integration-plan.md).
+
+**Update, 2026-10-21:** the check-in/check-out flow from [ADR-0006](adr/0006-tap-out-and-daily-registration.md) is implemented in the core, fake backend, dummy displays, and tests. The section 7 transition table describes the current core; `CHECKED_OUT` replaces `ACTIVATED`/`ALREADY_ACTIVE`. Real backend integration, midnight expiry, and same-card verification remain pending.
 
 Updated 2026-10-13 for reader fault handling, display readiness, and shared diagnostics. **Current phase: the controller collects both identifiers before simulated backend processing; real backend integration and broader reader validation remain open.** This replaces the card-lending implementation plan. The requirements below describe the intended student-only v1; core test coverage is not evidence that the integrated kiosk is delivered.
 
 ## 1. Purpose, scope, and current state
 
-Students tap their existing student cards to check in to and out of the makerspace, which grants access to participating tools while they are checked in. They do not borrow a second card. Check-in registers the card UID to a student number for that visit and activates the visit; check-out or midnight ends both.
+Students tap their existing student cards to check in to and out of the makerspace, which grants access to machine stations while they are checked in. They do not borrow a second card. Each tap goes to the access gatekeeper, which links the card to the student number (permanently), checks orientation, and opens or closes the visit; the nightly reset closes visits left open.
 
-The project delivers the kiosk and agrees its interface with the backend team. The backend/tool team owns accounts, training, eligibility policy, persistent card associations, visit records, daily expiry, and tool access enforcement. The kiosk neither controls tool power nor unlocks entrance doors.
+The project delivers the kiosk against the gatekeeper's kiosk API. The platform (main backend and gatekeeper) owns accounts, orientation, certifications, card links, visit records, the nightly reset, and station enforcement. The kiosk neither controls machine power nor unlocks entrance doors.
 
 V1 serves students only. Founder enrolment and access require a later requirements discussion; earlier ideas about personal founder RFID cards and backend provisioning remain provisional. Card dispensing, returns, iris and drawer motors, stock tracking, non-return flags, and the unlink outbox are outside current v1. Occupancy counting remains deferred.
 
@@ -18,19 +20,19 @@ The events, pure state machine, and tests in `kiosk/` and `tests/` model the stu
 
 | ID | Requirement |
 |---|---|
-| R1 | Registration is fully self-service and uses one physical student-card presentation. The PN532 first reads the hexadecimal UID; its RF field is then disabled so the OMNIKEY can read the student number. Both identifiers refer to the student's existing card, not a separate loan card. |
-| R2 | Before registering a UID, the backend must confirm an existing account, completed general induction, and eligibility under its access policy. The backend owns additional restrictions and supplies the denial reason. |
-| R3 | Successful registration also activates the visit. The kiosk displays success only after backend confirmation of activation. |
-| R4 | Every kiosk presentation must supply both the UID and student number before backend processing starts. The backend first checks whether that UID has an active visit (R5); otherwise the presentation is a check-in, with registration and eligibility checks (R1–R3). Tool readers are unchanged. |
-| R5 | A tap with a card that has an active visit checks the student out: the backend ends the visit and its registration, and the kiosk confirms it. Check-out requires no eligibility check. A later tap checks in again. There is no double-tap guard; a held card toggles the visit (accepted, see ADR-0006). |
-| R6 | A replacement student card is registered automatically after successful identification and eligibility checks. It replaces the UID on the student's active visit and permanently revokes the old card. |
-| R7 | One activation is recognised across all participating tools without separate makerspace check-ins. Each tool still enforces its own training requirements. General induction does not grant permission to use every tool. |
-| R8 | The backend expires visits and their registrations at 00:00 America/Toronto each day, following local daylight-saving changes. This is the daily UID wipe; it needs no job. Revoked cards stay revoked. This is a daily reset, not an opening-hours restriction; eligible students may check in again immediately. |
-| R9 | An unknown student number produces an account-signup QR. Save no association; the student signs up and presents their card again. |
-| R10 | Missing general induction produces a training-signup QR. Do not register or activate the card; the student returns after the backend records eligibility. |
-| R11 | If the backend is unavailable, refuse registration and activation and show an offline message. Never report success without confirmation. Recovery from an uncertain write outcome must be agreed with the backend team. |
-| R12 | Retain two output-only displays. Display 1 guides the current student through registration or activation, including prompts, QR codes, and results. Display 2 shows general instructions and system status, without the current student's personal information. These are the agreed roles for now; the previous checkout/return split no longer applies. |
-| R13 | Incomplete, delayed, repeated, or conflicting reader output must never associate one student's number with another card's UID. The mechanism for reliably correlating readings is not yet decided. |
+| R1 | Check-in is fully self-service and uses one physical student-card presentation. The PN532 first reads the hexadecimal UID; its RF field is then disabled so the OMNIKEY can read the student number. Both identifiers refer to the student's existing card, not a separate loan card. |
+| R2 | The gatekeeper decides check-in: an existing account that is active, a verified email, and usable orientation (staff included). It supplies the result, the reason code, and the wording. |
+| R3 | The kiosk displays a check-in or check-out only after the gatekeeper answers `CHECKED_IN` or `CHECKED_OUT`. |
+| R4 | Every kiosk presentation must supply both the UID and the student number before anything is sent. The kiosk sends exactly one tap per presentation (`POST /v1/kiosk/tap`, number as an integer, `X-Device-Key` header). Stations are unchanged by the kiosk. |
+| R5 | A tap by a student with an open visit checks them out, whichever of their cards was used; check-out needs no eligibility check. A later tap checks in again. The gatekeeper ignores the same card on the same kiosk within `tapDebounceSeconds` (default 3 s, `IGNORED_DUPLICATE`); the kiosk shows that answer's message again. A card held longer than that still toggles (accepted for now; card-removal detection is follow-up work). |
+| R6 | A new or replacement card is linked automatically by its first accepted tap. Older cards stay linked; the kiosk revokes nothing. Lost-card blocking is an admin and platform matter (not yet enforced at the kiosk, see ADR-0007). |
+| R7 | One open visit is recognised by every station. Each station still checks the certifications its machine requires; orientation does not grant use of every machine. |
+| R8 | The gatekeeper closes visits still open at its nightly reset (`nightlyResetTime`, default 03:00 America/Toronto). Card links are permanent; there is no daily UID wipe. The reset is not an opening-hours restriction; students may check in again immediately. |
+| R9 | `DENIED` with `UNKNOWN_STUDENT` shows the account-signup QR with the gatekeeper's message. The student signs up and taps again. |
+| R10 | `DENIED` with `ORIENTATION_REQUIRED` shows the orientation QR with the gatekeeper's message. `ORIENTATION_NOT_CONFIGURED` and every other reason show the message without a QR. |
+| R11 | If the gatekeeper is unreachable or has not synced yet (`/healthz` without `hasSnapshot: true`), refuse taps and show an offline or starting-up message. Never report success without a `200` result. A tap with no reply is resent once immediately; after that the kiosk shows "Couldn't reach the system, please tap again" and returns to ready. |
+| R12 | Retain two output-only displays. Display 1 guides the current student: prompts, QR codes, the gatekeeper's message and notices, and the student's first name. Display 2 shows general instructions and system status without personal information. |
+| R13 | Incomplete, delayed, repeated, or conflicting reader output must never send one student's number with another card's UID. The gatekeeper relinks a UID to whatever number it receives, so the kiosk is the only guard. The mechanism for reliably correlating readings is not yet decided. |
 
 Shane reports the UID-first arrangement works with one presentation. This is evidence of feasibility, not completed multi-card, endurance, or misassociation testing. See section 6 for the experiment and its limits.
 
@@ -40,16 +42,17 @@ These are acceptance scenarios for the integrated system. The revised core suite
 
 | Scenario | Required outcome | Requirements |
 |---|---|---|
-| Eligible first registration | One presentation yields both identifiers; confirmed registration and activation produce success. | R1–R3 |
-| Check-in | One presentation supplies both identifiers before any backend processing. Missing either identifier starts no backend operation. A card without an active visit is registered and activated after eligibility checks. | R4 |
-| Check-out | A tap with an active card ends the visit; tools then refuse the card. A suspended student or a dashboard outage does not block check-out. A following tap checks in again without a duplicate visit. | R5 |
-| No account | Show signup QR; create no association or activation; rescan after signup. | R9 |
-| Missing induction | Show training QR; create no association or activation. | R10 |
-| Other eligibility denial | Do not grant activation; display the backend decision using the agreed reason mapping. | R2, R4 |
-| Replacement card | Verify identity and eligibility; revoke the old UID, move the active visit to the new UID, and confirm. The old card stays refused on later days. A denied attempt must not be presented as successful replacement. | R6 |
-| Multiple tools | One visit is recognised across participating tools; a tool denies a student lacking its specific training. Verify with the backend/tool team. | R7 |
-| Daily reset | At local midnight, the visit and its registration expire with no job running; the next tap is a check-in that registers again. Revoked cards stay refused. Include dates across daylight-saving changes. | R8 |
-| Backend outage / lost response | No false success or offline activation. Verify recovery and uncertain outcomes against the agreed contract. | R11 |
+| First check-in with a new card | One presentation yields both identifiers; the gatekeeper answers `CHECKED_IN` with `cardLinked: true`; display 1 shows its message. | R1–R3 |
+| Check-in | One presentation supplies both identifiers before any request. Missing either identifier sends nothing. A student with no open visit who passes the checks is checked in. | R4 |
+| Check-out | A tap by a student with an open visit ends it; stations then refuse their card. A suspended student or a main-backend outage does not block check-out. A following tap checks in again. | R5 |
+| Repeat within the debounce | The same card tapped again within 3 s gets `IGNORED_DUPLICATE`; display 1 keeps showing the first answer's message; nothing toggles. | R5 |
+| No account | `UNKNOWN_STUDENT`: show the signup QR and message; tap again after signup. | R9 |
+| Missing orientation | `ORIENTATION_REQUIRED`: show the orientation QR and message. `ORIENTATION_NOT_CONFIGURED`: message only. | R10 |
+| Other denial | `EMAIL_NOT_VERIFIED`, `ACCOUNT_SUSPENDED`, `ACCOUNT_BANNED`, `DATA_STALE` or an unknown reason: no check-in; show the gatekeeper's message. | R2, R4 |
+| Replacement card | A student's new card checks them in and is linked; their old card still works until an admin deactivates it. | R6 |
+| Multiple machines | One visit is recognised at every station; a station denies a student lacking its machine's certifications. Verify with the platform team. | R7 |
+| Nightly reset | A visit still open at `nightlyResetTime` is closed; the next tap is a check-in. A visit left open past the reset is closed as "forgot" at the next tap. | R8 |
+| Gatekeeper outage / lost reply | No false success. Unsynced gatekeeper → starting-up screen. No reply → one immediate resend, then "please tap again". Wrong key (`401`) → "Kiosk not set up". Bad request (`422`) → read again. | R11 |
 | Reader interruptions and ambiguity | Missing or delayed output, repeats, different arrival orders, and conflicting identifiers cannot create an incorrect association or replacement. | R13 |
 | Interrupted UID-first session | Remove card A after its UID is read, then present card B. Never register A's UID to B's student number. Discard expired/cancelled session data and reject stale reader or backend results. A timeout alone does not prove same-card identity. | R13 |
 | Reader field command failure | A PN532 field-on or field-off timeout must not produce registration/activation success or silently allow uncertain reader state to continue pairing identifiers. Exercise recovery once its policy is designed. | R11, R13 |
@@ -67,9 +70,9 @@ These are acceptance scenarios for the integrated system. The revised core suite
 
 ## 5. Dependencies and unresolved decisions
 
-The backend team must provide the authoritative operations and decisions above; endpoint names, payload schemas, authentication, concurrency, and uncertain-outcome recovery are **not agreed**. The kiosk cannot determine access from a UID alone without that integration.
+The interface is the gatekeeper's kiosk API: [kiosk-api.md](kiosk-api.md), bound by the platform's [gatekeeper contract](../../makerspace-platform/docs/specs/gatekeeper-contract.md) §1.1 and §4. The kiosk needs a registered `KIOSK` device key and a network path to the gatekeeper on the private reader network. Work order: [gatekeeper-integration-plan.md](gatekeeper-integration-plan.md).
 
-Use the [backend agreement meeting document](backend-agreement.md) with the Backend VP. It compares the reviewed `ops-backend` checkout with the student-card requirements, names the affected routes/services/models, and provides a worksheet for operation guarantees and owners. Confirm the deployed revision and external clients in the meeting.
+Still open on the platform side (need Troy): refusing a UID already linked to another student (`CARD_CONFLICT`), and keeping deactivated (lost) cards blocked at the kiosk. The [ops backend agreement](backend-agreement.md) and [ops-api.md](ops-api.md) are historical.
 
 The OMNIKEY and UID reader must reliably supply the expected identifiers from the same presentation. The observed OMNIKEY output is nine digits followed by Enter; the PN532 returns UID bytes displayed as uppercase hexadecimal, with leading zeros preserved. These observations are not a universal card-format specification. Correlation rules, collision/conflict handling, and broader card compatibility require validation. A successful sequence or short time window does not prove both identifiers came from the same physical card. No mathematical student-number-to-UID conversion has been established. Reading a matching UID from the OMNIKEY as well remains an unverified option, not a requirement or demonstrated capability for these cards.
 
@@ -93,6 +96,8 @@ The [open-question list](../TODO.md) tracks UID conflicts, lost-card revocation,
 - These probes print identifiers only. No backend registration, replacement, activation, or production integration was demonstrated. Keep actual student identifiers out of committed examples and logs.
 
 ## 7. Core migration implemented and next work
+
+> **Pre-gatekeeper core, 2026-10-21:** this section describes the two-operation core built for ops-api.md (`ActivateUid`, `RegisterAndActivate`, `IdentityConfirmed`, `OUTCOME_UNKNOWN`). Phase 2 of the [integration plan](gatekeeper-integration-plan.md) collapses it to one tap; rewrite this section then.
 
 Shane explicitly delegated this migration. `kiosk/events.py`, `kiosk/machine.py`, `tests/test_machine.py`, and `tests/test_invariants.py` now implement and test the following internal design. The pure `handle(state, context, event) -> (state, context, effects)` interface is retained. Hardware reads, RF commands, timers, and backend calls remain outside it. Never read `kiosk_test.py`; preserve unrelated work and the gitignored explanation notes.
 
@@ -125,7 +130,7 @@ Collect-both routing attempts `ActivateUid` only after a complete `CardRead`. Pe
 - A single `read_card_async` operation owns both devices: discard queued OMNIKEY input before each UID attempt, obtain the UID and RF-off acknowledgement, then parse a complete student number. Never drain after RF-off; the new number may already be buffered. Waiting for a card is separate from the bounded student-number wait. Emit `CardRead` only after both values arrive. Missing/invalid input starts no backend operation. Pre-session failures use the current session ID.
 - A `SYN_DROPPED` event during student-number collection means Linux lost input. Abort acquisition with `ReaderFault`; never join digits across that warning. Current recovery requires restarting the reader process, which reopens the device and discards queued input before a fresh attempt.
 - `IdentityConfirmed` is a trusted assertion that the UID and student number belong to the same physical card. Correlation tokens and timing do not establish that fact. Its hardware mechanism is still unresolved; the tests supply synthetic confirmed events and are not physical pairing evidence. Do not turn raw OMNIKEY digits into this event merely because a UID was recently read.
-- Serialize events through `handle`. Start timers and schedule I/O without blocking it. Execute each backend operation at most once per `(session_id, op)` and echo that reference in results/errors. Readiness loss or cancellation revokes scan admission, including already queued results; shutdown awaits acquisition cleanup before devices close. Rearm only when idle, backend/reader ready, no write remains unresolved, and the previous acquisition has finished cleanup and its queued result has been handled or discarded. Normal result feedback supplies the pause before rearming; the controller prints `Ready for next card.` There is no separate capture effect or card-removal detector. Do not automatically retry writes.
+- Serialize events through `handle`. Start timers and schedule I/O without blocking it. Execute each backend operation at most once per `(tap_id, op)` and echo that reference in results/errors. Readiness loss or cancellation revokes scan admission, including already queued results; shutdown awaits acquisition cleanup before devices close. Rearm only when idle, backend/reader ready, no write remains unresolved, and the previous acquisition has finished cleanup and its queued result has been handled or discarded. Normal result feedback supplies the pause before rearming; the controller prints `Ready for next card.` There is no separate capture effect or card-removal detector. Do not automatically retry writes.
 - `RegisterAndActivate` is one logical request for eligible registration or replacement plus activation. Its backend implementation, concurrency semantics, and atomicity are not agreed. Success means the whole operation is confirmed. Denial and `UNREGISTERED` mean no write occurred; partial completion or an unconfirmed outcome must not be mapped to either success or a clean denial.
 - `BackendError` defaults to `FailureKind.UNKNOWN`. Use `NOT_SENT` only when the controller knows the request was never sent. Connectivity or reader recovery cannot clear an unresolved operation. A delayed authoritative result can settle the original operation, but obtaining that result when the response is permanently lost still needs a backend recovery contract.
 - The core is in memory only. Restart recovery, durable operation references, idempotency across processes, and readiness after a crash remain integration work. A health probe or a restart is not evidence that a previous write was undone. Internal integer session IDs are not a production backend idempotency scheme.

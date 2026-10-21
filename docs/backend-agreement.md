@@ -1,5 +1,7 @@
 # Student-card kiosk: ops backend agreement
 
+> **Superseded, 2026-10-21:** ops-backend is not being run; the access gatekeeper took over its job. The kiosk's contract is now [kiosk-api.md](kiosk-api.md) ([ADR-0007](adr/0007-kiosk-talks-to-gatekeeper.md)). This document is a historical review.
+
 **Status, 2026-10-20:** tap-out and daily registration ([ADR-0006](adr/0006-tap-out-and-daily-registration.md)) supersede this document's "repeated taps never check out" and "registration stays" requirements. See [ops-api.md](ops-api.md).
 
 **Status, 2026-10-19:** Shane is taking over ops-backend. The current contract is [ops-api.md](ops-api.md). This document remains the background review of the ops checkout and its open risks.
@@ -194,7 +196,7 @@ Consider this failure: ops commits a replacement, but the response never reaches
 
 Retain the outcome consistently with the domain write so a committed change cannot lose its recovery record. Distinguish a completed result, an operation still in progress, and an absent record whose meaning depends on the agreed retention/retry rules. The existing `/health` and `/health/db` endpoints establish process/database reachability only; neither resolves an earlier operation.
 
-The current core stops new interactions in `OUTCOME_UNKNOWN` until the original operation is resolved. A delayed definitive result can release that hold without showing the previous student's result or continuing their registration. If the reply never arrives, a recovery mechanism is still needed. Reconnection and process restart are not proof of rollback [undoing a write]. The core's in-memory `(session_id, op)` reference is not a production idempotency scheme.
+The current core stops new interactions in `OUTCOME_UNKNOWN` until the original operation is resolved. A delayed definitive result can release that hold without showing the previous student's result or continuing their registration. If the reply never arrives, a recovery mechanism is still needed. Reconnection and process restart are not proof of rollback [undoing a write]. The core's in-memory `(tap_id, op)` reference is not a production idempotency scheme.
 
 ### Replacement, revocation, and simultaneous requests
 

@@ -8,7 +8,9 @@ StartLimitIntervalSec=0
 [Service]
 User=kioskapp
 WorkingDirectory=/opt/kiosk
-# TODO(Wednesday): add --backend <url> and EnvironmentFile=/etc/kiosk/kiosk.env with the client.
+# GK_URL and GK_KIOSK_KEY (secret). systemd reads it as root before switching to kioskapp, so
+# root:root mode 600 is enough. See docs/gatekeeper-testing.md.
+EnvironmentFile=/etc/kiosk/kiosk.env
 ExecStart=/opt/kiosk/.venv/bin/python -m kiosk --device /dev/input/by-id/usb-HID_OMNIKEY_5427_CK_01010053595632323116284F02243630-event-kbd
 Environment=PYTHONUNBUFFERED=1
 StateDirectory=kiosk

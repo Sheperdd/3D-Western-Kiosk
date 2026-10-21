@@ -33,9 +33,9 @@ A system unit (starts at boot, independent of desktop login). Directives and why
 | Directive | Reason |
 |---|---|
 | `User=kioskapp`, `WorkingDirectory=/opt/kiosk` | Non-admin account, deployed checkout. |
-| `ExecStart=/opt/kiosk/.venv/bin/python -m kiosk --device /dev/input/by-id/<omnikey>-event-kbd --backend <url>` | Stable reader path; real backend. |
+| `ExecStart=/opt/kiosk/.venv/bin/python -m kiosk --device /dev/input/by-id/<omnikey>-event-kbd` | Stable reader path. Hardware mode refuses to start without `GK_URL` and `GK_KIOSK_KEY`. |
 | `Environment=PYTHONUNBUFFERED=1` | `print()` is block-buffered when not attached to a terminal; without this the journal lags. |
-| `EnvironmentFile=/etc/kiosk/kiosk.env` | Backend credential. Root-owned, mode 0600, never committed, never logged. |
+| `EnvironmentFile=/etc/kiosk/kiosk.env` | `GK_URL` and the `GK_KIOSK_KEY` secret. Root-owned, mode 0600 (systemd reads it before dropping to `kioskapp`), never committed, never logged. |
 | `StateDirectory=kiosk` | systemd creates `/var/lib/kiosk/`, writable by `kioskapp`, for the pending-operation record. |
 | `Restart=always`, `RestartSec=5` | Restart after any exit. `systemctl stop` still stays stopped. |
 | `StartLimitIntervalSec=0` (in `[Unit]`) | Never give up retrying, so an unplugged reader cannot permanently disable the service. |
@@ -79,6 +79,8 @@ Python restarts need no browser action. **Monitor reconnection** is manual for F
 ## 4. Real backend writes and power-loss recovery
 
 ### Backend client
+
+> **Superseded, 2026-10-21:** the kiosk talks to the gatekeeper instead (`kiosk/gatekeeper.py`, set by `GK_URL`; see [gatekeeper-integration-plan.md](gatekeeper-integration-plan.md)). The notes below describe the old ops-api design.
 
 - Implement in-process with `aiohttp.ClientSession` (already a dependency). The `--backend <url>` flag selects the real client. Without it, the existing simulated backend stays for the desktop demo.
 - Endpoints, request/response fields, authentication, and the recovery lookup are defined in [ops-api.md](ops-api.md).

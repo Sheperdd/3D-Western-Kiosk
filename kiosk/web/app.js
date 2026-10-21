@@ -16,18 +16,9 @@ const states = {
     tone: "busy", icon: "wait", label: "Please wait", title: "Getting ready for the next card",
     message: "Please wait before presenting another card.",
   },
-  ACTIVATING: {
+  CHECKING: {
     tone: "busy", icon: "wait", label: "Card read", title: "Checking your card",
     message: "You can remove your card now. Please wait.",
-  },
-  AWAITING_IDENTITY: {
-    tone: "busy", icon: "wait", label: "Card read", title: "Checking your card details",
-    message: "You can remove your card. Please wait.",
-    next: "Keep this screen in view. You do not need to scan again.",
-  },
-  REGISTERING: {
-    tone: "busy", icon: "wait", label: "Please wait", title: "Setting up your card",
-    message: "You can remove your card. Please wait while we finish setting up your visit.",
   },
   OFFLINE: {
     tone: "unavailable", icon: "alert", label: "Temporarily unavailable",
@@ -41,57 +32,48 @@ const states = {
     message: "We can't read cards right now. Please contact the makerspace team.",
     next: "Please wait for the ready screen before presenting your card.",
   },
-  OUTCOME_UNKNOWN: {
-    tone: "unavailable", icon: "help", label: "Please ask for help", title: "Result not confirmed",
-    message: "Remove your card. We couldn't confirm your check-in or check-out.",
-    next: "Contact the makerspace team. Don't scan again yet.",
+};
+
+// The gatekeeper's message replaces `message` when it sends one; the backend owns that wording.
+// `success` means "show access details", so check-out leaves it off.
+const results = {
+  CHECKED_IN: {
+    tone: "success", icon: "check", label: "Checked in", title: "You're checked in",
+    message: "Welcome to the makerspace.", success: true,
+    next: "Remove your card. Follow each machine's operating instructions; access is checked again at the machine.",
+  },
+  CHECKED_OUT: {
+    tone: "success", icon: "check", label: "Checked out", title: "You're checked out",
+    message: "Thanks for visiting the makerspace.",
+    next: "Remove your card. Tap again to check back in.",
+  },
+  DENIED: {
+    tone: "attention", icon: "help", label: "Next step", title: "We couldn't check you in",
+    message: "Contact the makerspace team for help.",
+  },
+  // A repeat tap within the debounce: the gatekeeper repeats its previous answer.
+  IGNORED_DUPLICATE: {
+    tone: "attention", icon: "card", label: "Card already read", title: "We already have your tap",
+    message: "Your previous tap was recorded.",
+  },
+  READ_AGAIN: {
+    tone: "attention", icon: "card", label: "Please try again", title: "Let's try your card again",
+    message: "We couldn't read your card completely.",
+  },
+  // Never claim either way: the tap may or may not have landed.
+  UNREACHABLE: {
+    tone: "attention", icon: "card", label: "Please try again", title: "Couldn't reach the system",
+    message: "Tap again when the ready screen returns. If this repeats, contact the makerspace team.",
+  },
+  NOT_SET_UP: {
+    tone: "unavailable", icon: "alert", label: "Please ask for help", title: "Kiosk not set up",
+    message: "Please contact the makerspace team.",
   },
 };
 
-const outcomes = {
-  REGISTERED_AND_ACTIVE: {
-    title: "You're checked in",
-    message: "Remove your card. Tap again when you leave.", success: true,
-  },
-  // Not `success`: that flag means "show access details". The spread in renderPayload
-  // lets these fields override the attention defaults.
-  CHECKED_OUT: {
-    title: "You're checked out",
-    message: "Remove your card. Thanks for visiting the makerspace.",
-    tone: "success", icon: "check", label: "Checked out", next: "Tap again to check back in.",
-  },
-  REPLACED_AND_ACTIVE: {
-    title: "Replacement card activated",
-    message: "Remove your card. Your previous card no longer works for makerspace access.", success: true,
-  },
-  UNKNOWN_STUDENT: {
-    title: "Create your makerspace account",
-    message: "Remove your card. Sign up for an account, then return and present your card again.",
-    qr: "Create an account",
-  },
-  MISSING_INDUCTION: {
-    title: "General induction required",
-    message: "Remove your card. Complete general induction, then return after your training has been recorded.",
-    qr: "General induction",
-  },
-  DENIED: {
-    title: "Unable to activate your visit",
-    message: "Remove your card. Contact the makerspace team for help.",
-  },
-  UID_CONFLICT: {
-    title: "This card needs assistance",
-    message: "Remove your card. Contact the makerspace team to resolve the card registration.",
-  },
-  READ_AGAIN: {
-    title: "Let's try your card again",
-    message: "We couldn't read your card completely. Remove it and wait for the ready screen before trying again.",
-    retry: true,
-  },
-  SESSION_EXPIRED: {
-    title: "We couldn't complete this attempt",
-    message: "Remove your card. Wait for the ready screen, then try again. If this repeats, contact the makerspace team.",
-    retry: true,
-  },
+const qrCodes = {
+  UNKNOWN_STUDENT: "Create an account",
+  ORIENTATION_REQUIRED: "Orientation",
 };
 
 const publicStatuses = {
@@ -144,6 +126,8 @@ function render(view) {
   element("message").textContent = view.message;
   element("student-icon").setAttribute("href", `#icon-${view.icon}`);
   element("access-details").hidden = !view.success;
+  element("notices").textContent = view.notices || "";
+  element("notices").hidden = !view.notices;
   element("qr-panel").hidden = !view.qr;
   element("qr-title").textContent = view.qr || "";
   element("next-step").textContent = view.next || "This screen updates automatically.";
@@ -154,6 +138,8 @@ function renderPayload(data) {
     render(unavailable);
     return;
   }
+  // Shown only when the kiosk says so: wrongly claiming "no real access changes" is the worse error.
+  element("demo-badge").hidden = data.demo !== true;
 
   if (displayNumber === "2") {
     const status = data.status;
@@ -162,27 +148,27 @@ function renderPayload(data) {
     return;
   }
 
-  if (typeof data.state !== "string"
-      || (data.outcome !== null && typeof data.outcome !== "string")) {
+  const text = (value) => value === null || typeof value === "string";
+  if (typeof data.state !== "string" || !text(data.result) || !text(data.reason)
+      || !text(data.message) || !Array.isArray(data.notices)
+      || !data.notices.every((notice) => typeof notice === "string")) {
     render(unavailable);
     return;
   }
 
   if (data.state === "RESULT") {
-    const outcome = data.outcome;
-    if (!Object.hasOwn(outcomes, outcome)) {
+    if (!Object.hasOwn(results, data.result)) {
       render(unavailable);
       return;
     }
-    const result = outcomes[outcome];
+    const result = results[data.result];
     render({
-      tone: result.success ? "success" : "attention",
-      icon: result.success ? "check" : result.retry ? "card" : "help",
-      label: result.success ? "Checked in" : result.retry ? "Please try again" : "Next step",
-      next: result.success
-        ? "Follow each machine's operating instructions. Access is checked again at the machine."
-        : "Please wait for the ready screen before another scan.",
+      next: "Remove your card. Please wait for the ready screen before another scan.",
       ...result,
+      message: data.message || result.message,
+      notices: data.notices.join("\n"),
+      // Keyed on reason, so a repeated denial (IGNORED_DUPLICATE) shows its QR again.
+      qr: Object.hasOwn(qrCodes, data.reason) ? qrCodes[data.reason] : "",
     });
     return;
   }
