@@ -8,6 +8,7 @@ from kiosk.display import DISPLAY_DATA
 from kiosk.events import (
     BackendOnline,
     CardRead,
+    IdentityConfirmed,
     KioskState,
     Outcome,
     ReaderReady,
@@ -33,9 +34,9 @@ def test_display_callback_updates_shared_payloads(monkeypatch) -> None:
             (KioskState.REGISTERING, "IN USE"),
             (KioskState.RESULT, "IN USE"),
         ):
-            on_state_change(state, Outcome.ACTIVATED, state == KioskState.IDLE)
+            on_state_change(state, Outcome.CHECKED_OUT, state == KioskState.IDLE)
             assert app[DISPLAY_DATA] is display_data
-            assert display_data[1] == {"state": state.name, "outcome": "ACTIVATED"}
+            assert display_data[1] == {"state": state.name, "outcome": "CHECKED_OUT"}
             assert display_data[2] == {"status": expected_status}
 
         on_state_change(KioskState.IDLE, None, False)
@@ -51,7 +52,7 @@ def test_display_callback_updates_shared_payloads(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
-def test_demo_waits_ten_seconds_before_scan_and_cancels_timer(monkeypatch, cancelled) -> None:
+def test_demo_checks_in_then_out_and_cancels_timers(monkeypatch, cancelled) -> None:
     runner = Mock(setup=AsyncMock(), cleanup=AsyncMock())
     monkeypatch.setattr(entrypoint.web, "AppRunner", Mock(return_value=runner))
     monkeypatch.setattr(entrypoint.web, "TCPSite", Mock(return_value=Mock(start=AsyncMock())))
@@ -63,13 +64,17 @@ def test_demo_waits_ten_seconds_before_scan_and_cancels_timer(monkeypatch, cance
         assert queue.get_nowait() == ReaderReady(0)
         assert queue.empty()
         on_state_change(KioskState.IDLE, None, True)
-        schedule.assert_called_once()
-        delay, scan = schedule.call_args.args
-        assert delay == 10.0
+        (check_in_delay, check_in), (check_out_delay, check_out) = (
+            call.args for call in schedule.call_args_list
+        )
+        assert (check_in_delay, check_out_delay) == (10.0, 30.0)
         if cancelled:
             raise asyncio.CancelledError
-        scan()
+        check_in()
         assert queue.get_nowait() == CardRead(1, "1234567890", "000123456")
+        assert queue.get_nowait() == IdentityConfirmed(1, "1234567890", "000123456")
+        check_out()
+        assert queue.get_nowait() == CardRead(2, "1234567890", "000123456")
         assert queue.empty()
 
     async def check():
@@ -82,5 +87,5 @@ def test_demo_waits_ten_seconds_before_scan_and_cancels_timer(monkeypatch, cance
             await entrypoint.main()
 
     asyncio.run(check())
-    timer.cancel.assert_called_once_with()
+    assert timer.cancel.call_count == 2
     runner.cleanup.assert_awaited_once()

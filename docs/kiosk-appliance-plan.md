@@ -45,7 +45,11 @@ HTTP stays bound to `127.0.0.1:8000`. Logs go to the journal; its default size l
 
 ### Browsers
 
-The labwc `autostart` file (in the `kioskapp` user's labwc config) starts one shell loop per display:
+The labwc `autostart` file (in the `kioskapp` user's labwc config; source in `deploy/labwc/`) waits 30 seconds once, then starts one shell loop per display.
+
+**The 30-second boot delay is required.** Without it, Chromium launched right after login comes up as a fullscreen grey window every time (both instances log "Network service crashed" about two seconds in). Launched later, or relaunched by the loop, it renders. Root cause unknown (tested 2026-10-20).
+
+Each loop:
 
 1. Wait until `curl -sf http://127.0.0.1:8000/` succeeds. If Chromium loads before the server is up, it shows its own error page, which does not reliably retry.
 2. `while :; do chromium …; sleep 5; done` so a closed or crashed browser comes back after five seconds.
@@ -59,7 +63,7 @@ Chromium flags per instance:
 - `--class=kiosk-d1` / `--class=kiosk-d2` gives each window a distinct identity.
 - URL `http://127.0.0.1:8000/?display=1` (student) or `?display=2` (public).
 
-Assign windows to outputs with labwc window rules (`windowRule identifier="kiosk-d1"` → `MoveToOutput output="HDMI-A-1"`). **Verify the app_id that the installed Chromium actually reports on Wayland.** Do not match on title: the page title is the same for both displays until JavaScript runs. Do not rely on launch order. [labwc configuration reference](https://labwc.github.io/labwc-config.5.html)
+Assign windows to outputs with labwc window rules: `kiosk-d1` (student, left monitor) → `MoveToOutput output="HDMI-A-2"`, `kiosk-d2` (public, right monitor) → `HDMI-A-1`. The rules only move the window; `--kiosk` makes it fullscreen. Do not add `ToggleFullscreen`: every boot test with it came up grey or windowed. `--class` sets the Wayland app_id only with `--kiosk` or a normal window, not with `--app`. Do not match on title: the page title is the same for both displays until JavaScript runs. Do not rely on launch order. [labwc configuration reference](https://labwc.github.io/labwc-config.5.html)
 
 Python restarts need no browser action. **Monitor reconnection** is manual for Friday: over SSH, `pkill chromium` as `kioskapp`; the loops relaunch and the window rules reapply. Automatic hotplug handling is deferred.
 
@@ -121,7 +125,7 @@ Deferred: hardware watchdog, recovery from a fully frozen OS, UPS, read-only ove
 
 - Two-hour unattended soak with both screens up and the reader waiting, plus at least 100 counted scan cycles with alternating test cards. The earlier PN532 RF failure appeared after about a minute; record any repeat.
 - `journalctl -u kiosk | grep -E '[0-9]{9}'` returns no student numbers; check for UIDs too.
-- Pull power and restore it; both screens appear within 90 seconds.
+- Pull power and restore it; both screens appear within about 2 minutes (desktop at ~68 s, plus the 30-second browser delay and Chromium startup). The original 90-second target is not met; trimming boot services is deferred.
 - Interrupt a write after the backend commits but before the reply (for example, drop the network). The hold must survive a restart and must not resend.
 - End to end through ops: one test card activated at the kiosk is allowed by a node, and the untrained student's card is denied (`INSUFFICIENT_TRAINING` or `MISSING_INDUCTION`). Node code stays outside this repo.
 

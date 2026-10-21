@@ -30,6 +30,12 @@ from kiosk.events import (
 from kiosk.machine import Context
 
 
+@pytest.fixture(autouse=True)
+def fresh_demo_visits(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fake backend's checked-in set is module state; don't leak it between tests.
+    monkeypatch.setattr(controller, "DEMO_CHECKED_IN", set())
+
+
 @pytest.mark.parametrize("number", ["000123456", None, OSError("Reader disconnected")])
 def test_backend_waits_until_student_number_is_collected(
     monkeypatch: pytest.MonkeyPatch, number
@@ -60,10 +66,10 @@ def test_backend_waits_until_student_number_is_collected(
                 raise number
             return number
 
-        async def activate(queue, effect, seconds, desired_outcome):
+        async def activate(queue, effect, seconds, desired_outcome=None):
             backend_calls.append(effect)
             queue.put_nowait(
-                BackendResult(effect.session_id, BackendOp.ACTIVATE_UID, desired_outcome)
+                BackendResult(effect.session_id, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)
             )
 
         monkeypatch.setattr(controller, "handle", observe)
@@ -89,7 +95,7 @@ def test_backend_waits_until_student_number_is_collected(
             completed = [event for event in events if isinstance(event, CardRead)]
             if isinstance(number, str):
                 assert completed == [CardRead(1, "0001ABCD", number)]
-                assert backend_calls == [ActivateUid(1, "0001ABCD")]
+                assert backend_calls == [ActivateUid(1, "0001ABCD", number)]
             else:
                 assert completed == backend_calls == []
             assert not any(isinstance(event, IdentityConfirmed) for event in events)
@@ -144,7 +150,7 @@ def test_unregistered_hardware_session_expires_without_confirming_raw_number(
             number_received.set()
             return "000123456"
 
-        async def activate(queue, effect, seconds, desired_outcome):
+        async def activate(queue, effect, seconds, desired_outcome=None):
             await number_received.wait()
             await original_activate(queue, effect, 0, Outcome.UNREGISTERED)
 
@@ -222,7 +228,8 @@ def test_hardware_acquisition_waits_for_readiness_and_rearms_when_ready(
         monkeypatch.setattr(readers, "read_uid_async", read_uid)
         monkeypatch.setattr(readers, "read_student_number_async", read_student_number)
         monkeypatch.setattr(controller, "DEMO_ACTIVATION_DELAY", 0)
-        monkeypatch.setitem(controller.RESULT_DURATION_SECONDS, Outcome.ACTIVATED, 0)
+        monkeypatch.setattr(controller, "DEMO_CHECKED_IN", {"0001ABCD"})
+        monkeypatch.setitem(controller.RESULT_DURATION_SECONDS, Outcome.CHECKED_OUT, 0)
         runner = asyncio.create_task(
             controller.run(
                 queue,
@@ -254,9 +261,9 @@ def test_hardware_acquisition_waits_for_readiness_and_rearms_when_ready(
                 assert event == CardRead(1, "0001ABCD", "000000001")
                 assert state == KioskState.ACTIVATING
                 event, state, context = await asyncio.wait_for(observed.get(), 1)
-                assert event == BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED)
+                assert event == BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)
                 assert state == KioskState.RESULT
-                assert context.outcome == Outcome.ACTIVATED
+                assert context.outcome == Outcome.CHECKED_OUT
 
             _, state, _ = await asyncio.wait_for(observed.get(), 1)
             assert state == KioskState.IDLE
@@ -417,7 +424,7 @@ def test_hardware_acquisition_cancellation_drains_cleanup(
 
 
 @pytest.mark.parametrize("first_pair", [("0001ABCD", "000000001"), None])
-@pytest.mark.parametrize("outcome", [Outcome.ACTIVATED, Outcome.DENIED])
+@pytest.mark.parametrize("outcome", [Outcome.CHECKED_OUT, Outcome.DENIED])
 @pytest.mark.parametrize("second_uid", ["0001ABCD", "0002ABCD"])
 def test_repeated_scans_wait_for_feedback_and_collect_both_again(
     monkeypatch: pytest.MonkeyPatch, first_pair, outcome, second_uid
@@ -448,7 +455,7 @@ def test_repeated_scans_wait_for_feedback_and_collect_both_again(
             await release_second.wait()
             return second_uid, "000000002"
 
-        async def activate(queue, effect, seconds, desired_outcome):
+        async def activate(queue, effect, seconds, desired_outcome=None):
             calls.append(effect)
             queue.put_nowait(BackendResult(effect.session_id, BackendOp.ACTIVATE_UID, outcome))
 
@@ -491,7 +498,7 @@ def test_repeated_scans_wait_for_feedback_and_collect_both_again(
             second = await asyncio.wait_for(reach_result(), 1)
             assert second.session_id == first.session_id + 1
             assert second.outcome == outcome
-            assert calls[-1] == ActivateUid(second.session_id, second_uid)
+            assert calls[-1] == ActivateUid(second.session_id, second_uid, "000000002")
             assert len(calls) == 1 + int(first_pair is not None)
             assert reads == 2
         finally:
@@ -616,11 +623,8 @@ def test_fake_registration_emits_exactly_one_response(
 @pytest.mark.parametrize(
     "outcome",
     [
-        Outcome.ACTIVATED,
-        Outcome.ALREADY_ACTIVE,
+        Outcome.CHECKED_OUT,
         Outcome.UNREGISTERED,
-        Outcome.UNKNOWN_STUDENT,
-        Outcome.MISSING_INDUCTION,
         Outcome.DENIED,
         Outcome.UID_CONFLICT,
     ],
@@ -628,7 +632,9 @@ def test_fake_registration_emits_exactly_one_response(
 def test_fake_activation_preserves_operation_and_outcome(outcome: Outcome) -> None:
     async def check() -> None:
         queue: asyncio.Queue[Event] = asyncio.Queue()
-        await controller.fake_activate_uid(queue, ActivateUid(9, "0001ABCD"), 0, outcome)
+        await controller.fake_activate_uid(
+            queue, ActivateUid(9, "0001ABCD", "000000001"), 0, outcome
+        )
         assert queue.get_nowait() == BackendResult(9, BackendOp.ACTIVATE_UID, outcome)
         assert queue.empty()
 
@@ -663,7 +669,7 @@ def test_backend_exception_emits_matching_unknown_error(
             monkeypatch.setattr(queue, "put", fail_first_response)
 
         if operation == BackendOp.ACTIVATE_UID:
-            await controller.fake_activate_uid(queue, ActivateUid(12, "0001ABCD"), 0)
+            await controller.fake_activate_uid(queue, ActivateUid(12, "0001ABCD", "000000001"), 0)
         else:
             await controller.fake_register_and_activate(
                 queue, RegisterAndActivate(12, "0001ABCD", "000000001"), 0
@@ -688,7 +694,9 @@ def test_backend_cancellation_propagates_without_error_event(
         monkeypatch.setattr(queue, "put", cancelled_response)
         with pytest.raises(asyncio.CancelledError):
             if operation == BackendOp.ACTIVATE_UID:
-                await controller.fake_activate_uid(queue, ActivateUid(12, "0001ABCD"), 0)
+                await controller.fake_activate_uid(
+                    queue, ActivateUid(12, "0001ABCD", "000000001"), 0
+                )
             else:
                 await controller.fake_register_and_activate(
                     queue, RegisterAndActivate(12, "0001ABCD", "000000001"), 0
@@ -713,8 +721,7 @@ def test_timer_emits_matching_session_and_name(name: TimeoutName) -> None:
     ("name", "outcome", "expected_seconds"),
     [
         (TimeoutName.SESSION, None, 13.0),
-        (TimeoutName.RESULT, Outcome.ACTIVATED, 10.0),
-        (TimeoutName.RESULT, Outcome.ALREADY_ACTIVE, 10.0),
+        (TimeoutName.RESULT, Outcome.CHECKED_OUT, 6.0),
         (TimeoutName.RESULT, Outcome.REGISTERED_AND_ACTIVE, 10.0),
         (TimeoutName.RESULT, Outcome.REPLACED_AND_ACTIVE, 10.0),
         (TimeoutName.RESULT, Outcome.UNKNOWN_STUDENT, 30.0),
@@ -797,12 +804,12 @@ def test_timer_dispatch_cancels_old_task(
         monkeypatch.setattr(controller, "fire_timeout", controlled_timer)
         start = StartTimeout(1, name)
         key = (start.session_id, start.name)
-        controller.dispatch(queue, start, timers, tasks, outcome=Outcome.ACTIVATED)
+        controller.dispatch(queue, start, timers, tasks, outcome=Outcome.CHECKED_OUT)
         old_task = timers[key]
         await asyncio.sleep(0)  # Let the original timer start waiting.
 
         if replace:
-            controller.dispatch(queue, start, timers, tasks, outcome=Outcome.ACTIVATED)
+            controller.dispatch(queue, start, timers, tasks, outcome=Outcome.CHECKED_OUT)
             assert timers[key] is not old_task
         else:
             controller.dispatch(queue, CancelTimeout(*key), timers, tasks)
@@ -826,13 +833,15 @@ def test_timer_dispatch_cancels_old_task(
 def test_cancellation_does_not_touch_other_timers(monkeypatch: pytest.MonkeyPatch) -> None:
     async def check() -> None:
         monkeypatch.setitem(controller.DEMO_TIMEOUT_SECONDS, TimeoutName.SESSION, 0)
-        monkeypatch.setitem(controller.RESULT_DURATION_SECONDS, Outcome.ACTIVATED, 0)
+        monkeypatch.setitem(controller.RESULT_DURATION_SECONDS, Outcome.CHECKED_OUT, 0)
         queue: asyncio.Queue[Event] = asyncio.Queue()
         timers: dict[tuple[int, TimeoutName], asyncio.Task[None]] = {}
         tasks: set[asyncio.Task[None]] = set()
         keys = [(1, TimeoutName.SESSION), (1, TimeoutName.RESULT), (2, TimeoutName.SESSION)]
         for key in keys:
-            controller.dispatch(queue, StartTimeout(*key), timers, tasks, outcome=Outcome.ACTIVATED)
+            controller.dispatch(
+                queue, StartTimeout(*key), timers, tasks, outcome=Outcome.CHECKED_OUT
+            )
         scheduled = list(timers.values())
         controller.dispatch(queue, CancelTimeout(*keys[0]), timers, tasks)
         await asyncio.gather(*scheduled, return_exceptions=True)
@@ -846,7 +855,7 @@ def test_cancellation_does_not_touch_other_timers(monkeypatch: pytest.MonkeyPatc
 @pytest.mark.parametrize(
     ("effect", "expected_seconds"),
     [
-        (ActivateUid(4, "0001ABCD"), 2.5),
+        (ActivateUid(4, "0001ABCD", "000000001"), 2.5),
         (RegisterAndActivate(4, "0001ABCD", "000000001"), 0.001),
     ],
 )
@@ -873,17 +882,13 @@ def test_backend_dispatch_tracks_and_releases_tasks(
 
 
 @pytest.mark.parametrize("hardware_mode", [False, True])
-@pytest.mark.parametrize("registration", [False, True])
-def test_default_backend_success_does_not_depend_on_readers(
-    monkeypatch: pytest.MonkeyPatch, hardware_mode: bool, registration: bool
+@pytest.mark.parametrize("checked_in", [False, True], ids=["check-in", "check-out"])
+def test_default_backend_toggles_without_readers(
+    monkeypatch: pytest.MonkeyPatch, hardware_mode: bool, checked_in: bool
 ) -> None:
     async def check() -> None:
         queue: asyncio.Queue[Event] = asyncio.Queue()
         results = asyncio.Queue()
-        original_activation = controller.fake_activate_uid
-
-        async def unregistered(queue, effect, seconds, desired_outcome):
-            await original_activation(queue, effect, seconds, Outcome.UNREGISTERED)
 
         def observe(state, outcome, ready_for_card):
             if state == KioskState.RESULT:
@@ -891,11 +896,10 @@ def test_default_backend_success_does_not_depend_on_readers(
 
         monkeypatch.setattr(controller, "DEMO_ACTIVATION_DELAY", 0)
         monkeypatch.setattr(controller, "DEMO_REGISTRATION_DELAY", 0)
-        if registration:
-            monkeypatch.setattr(controller, "fake_activate_uid", unregistered)
+        monkeypatch.setattr(controller, "DEMO_CHECKED_IN", {"0001ABCD"} if checked_in else set())
         for event in [BackendOnline(), ReaderReady(0), CardRead(1, "0001ABCD", "000000001")]:
             queue.put_nowait(event)
-        if registration:
+        if not checked_in:
             queue.put_nowait(IdentityConfirmed(1, "0001ABCD", "000000001"))
         runner = asyncio.create_task(
             controller.run(
@@ -908,7 +912,9 @@ def test_default_backend_success_does_not_depend_on_readers(
         )
         try:
             outcome = await asyncio.wait_for(results.get(), 1)
-            assert outcome == (Outcome.REGISTERED_AND_ACTIVE if registration else Outcome.ACTIVATED)
+            assert outcome == (Outcome.CHECKED_OUT if checked_in else Outcome.REGISTERED_AND_ACTIVE)
+            # The next tap of the same card flips the visit the other way.
+            assert ("0001ABCD" in controller.DEMO_CHECKED_IN) is not checked_in
         finally:
             runner.cancel()
             await asyncio.gather(runner, return_exceptions=True)
@@ -919,14 +925,14 @@ def test_default_backend_success_does_not_depend_on_readers(
 @pytest.mark.parametrize(
     ("activation", "identity", "failure", "expected_state", "expected_outcome"),
     [
-        (Outcome.ACTIVATED, False, None, KioskState.RESULT, Outcome.ACTIVATED),
+        (Outcome.CHECKED_OUT, False, None, KioskState.RESULT, Outcome.CHECKED_OUT),
         (Outcome.DENIED, False, None, KioskState.RESULT, Outcome.DENIED),
         (Outcome.UNREGISTERED, True, None, KioskState.RESULT, Outcome.REGISTERED_AND_ACTIVE),
         (Outcome.UNREGISTERED, True, FailureKind.NOT_SENT, KioskState.OFFLINE, None),
         (Outcome.UNREGISTERED, True, FailureKind.UNKNOWN, KioskState.OUTCOME_UNKNOWN, None),
         (Outcome.UNREGISTERED, False, None, KioskState.RESULT, Outcome.SESSION_EXPIRED),
     ],
-    ids=["activation", "denial", "registration", "not-sent", "unknown", "missing-identity"],
+    ids=["check-out", "denial", "check-in", "not-sent", "unknown", "missing-identity"],
 )
 def test_controller_flow(
     monkeypatch: pytest.MonkeyPatch, activation, identity, failure, expected_state, expected_outcome
@@ -942,7 +948,7 @@ def test_controller_flow(
         def observe(state, outcome, ready_for_card):
             observed.put_nowait((state, outcome))
 
-        async def activate(queue, effect, seconds, desired_outcome):
+        async def activate(queue, effect, seconds, desired_outcome=None):
             await original_activation(queue, effect, 0, activation)
 
         async def register(queue, effect, seconds, failure=None):
@@ -1019,7 +1025,7 @@ def test_shutdown_cancels_and_awaits_timer_and_backend(
         async def timer(queue, effect, seconds):
             await wait_until_cancelled()
 
-        async def activate(queue, effect, seconds, desired_outcome):
+        async def activate(queue, effect, seconds, desired_outcome=None):
             await wait_until_cancelled()
 
         monkeypatch.setattr(controller, "fire_timeout", timer)
@@ -1103,7 +1109,7 @@ def test_shutdown_awaits_removed_timer_cleanup(
                 await release_cleanup.wait()
                 cleanup_finished.set()
 
-        async def activate(queue, effect, seconds, desired_outcome):
+        async def activate(queue, effect, seconds, desired_outcome=None):
             await blocker.wait()
 
         monkeypatch.setattr(controller, "dispatch", capture_dispatch)
@@ -1181,10 +1187,10 @@ def test_late_backend_response_resolves_hold_without_showing_success(
             if holding.is_set() and state == resting_state:
                 resolved.set()
 
-        async def activate(queue, effect, seconds, desired_outcome):
+        async def activate(queue, effect, seconds, desired_outcome=None):
             started.set()
             await release_backend.wait()
-            await original_activation(queue, effect, 0, Outcome.ACTIVATED)
+            await original_activation(queue, effect, 0, Outcome.CHECKED_OUT)
 
         async def read_card(reader, student_reader, *, student_timeout):
             nonlocal reads

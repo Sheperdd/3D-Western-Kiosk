@@ -25,8 +25,7 @@ class BackendOp(StrEnum):
 
 
 class Outcome(StrEnum):
-    ACTIVATED = "activated"
-    ALREADY_ACTIVE = "already_active"
+    CHECKED_OUT = "checked_out"
     UNREGISTERED = "unregistered"  # Routing only; this is not an unknown student.
     REGISTERED_AND_ACTIVE = "registered_and_active"
     REPLACED_AND_ACTIVE = "replaced_and_active"
@@ -156,8 +155,11 @@ Event = (
 
 @dataclass(frozen=True)
 class ActivateUid:
+    """The tap: the backend checks out an active visit, or answers UNREGISTERED."""
+
     session_id: int
     uid: str
+    student_number: str
 
 
 @dataclass(frozen=True)

@@ -69,7 +69,7 @@ def test_complete_pair_starts_activation_without_confirming_identity() -> None:
     assert ctx.pending_op == BackendOp.ACTIVATE_UID
     assert effects == [
         StartTimeout(1, TimeoutName.SESSION),
-        ActivateUid(1, UID),
+        ActivateUid(1, UID, STUDENT),
     ]
 
 
@@ -104,25 +104,32 @@ def test_conflicting_raw_number_during_activation_cannot_become_trusted() -> Non
     assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
 
 
-@pytest.mark.parametrize("outcome", [Outcome.ACTIVATED, Outcome.ALREADY_ACTIVE])
-def test_returning_student_supplies_both_and_every_new_tap_rechecks_backend(
-    outcome: Outcome,
-) -> None:
+def test_tap_checks_out_and_the_next_session_checks_in_again() -> None:
     state, ctx, _ = start()
-    state, ctx, effects = handle(state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, outcome))
+    state, ctx, effects = handle(
+        state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)
+    )
     assert state == KioskState.RESULT
-    assert ctx.outcome == outcome
+    assert ctx.outcome == Outcome.CHECKED_OUT
     assert ctx.uid is ctx.confirmed_student_number is ctx.pending_op is None
     assert StartTimeout(1, TimeoutName.RESULT) in effects
+    assert not any(isinstance(effect, RegisterAndActivate) for effect in effects)
 
-    # A held/repeated read cannot retrigger activation or extend the result timer.
+    # A held/repeated read in the same session cannot tap again or extend the result timer.
     assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
     state, ctx, _ = handle(state, ctx, Timeout(1, TimeoutName.RESULT))
     assert state == KioskState.IDLE
     assert handle(state, ctx, CardRead(1, UID, "000000001")) == (state, ctx, [])
+
+    # The next session's tap finds no visit and goes down the check-in path.
     state, ctx, effects = handle(state, ctx, CardRead(2, UID, "000000001"))
-    assert state == KioskState.ACTIVATING
-    assert ActivateUid(2, UID) in effects
+    assert ActivateUid(2, UID, STUDENT) in effects
+    state, ctx, _ = handle(state, ctx, IdentityConfirmed(2, UID, STUDENT))
+    state, ctx, effects = handle(
+        state, ctx, BackendResult(2, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED)
+    )
+    assert state == KioskState.REGISTERING
+    assert effects == [RegisterAndActivate(2, UID, STUDENT)]
 
 
 @pytest.mark.parametrize("identity_first", [True, False])
@@ -159,10 +166,21 @@ def test_registration_and_replacement_accept_both_arrival_orders(
     assert not any(isinstance(effect, (ActivateUid, RegisterAndActivate)) for effect in effects)
 
 
-@pytest.mark.parametrize("op", list(BackendOp))
 @pytest.mark.parametrize(
-    "outcome",
-    [Outcome.UNKNOWN_STUDENT, Outcome.MISSING_INDUCTION, Outcome.DENIED, Outcome.UID_CONFLICT],
+    ("op", "outcome"),
+    [
+        (BackendOp.ACTIVATE_UID, Outcome.DENIED),
+        (BackendOp.ACTIVATE_UID, Outcome.UID_CONFLICT),
+        *(
+            (BackendOp.REGISTER_AND_ACTIVATE, outcome)
+            for outcome in (
+                Outcome.UNKNOWN_STUDENT,
+                Outcome.MISSING_INDUCTION,
+                Outcome.DENIED,
+                Outcome.UID_CONFLICT,
+            )
+        ),
+    ],
 )
 def test_backend_denial_selects_feedback_without_any_followup_write(
     op: BackendOp, outcome: Outcome
@@ -257,7 +275,7 @@ def test_cancel_a_start_b_then_delayed_a_events_cannot_affect_b() -> None:
     for event in (
         IDENTITY,
         CardRead(1, UID, "000000001"),
-        BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED),
+        BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT),
         BackendError(1, BackendOp.ACTIVATE_UID),
         Timeout(1, TimeoutName.SESSION),
         CancelSession(1),
@@ -292,7 +310,7 @@ def test_interrupted_write_holds_until_authoritative_outcome(op: BackendOp, even
         state, ctx, effects = handle(state, ctx, health)
         assert state == KioskState.OUTCOME_UNKNOWN
         assert effects == []
-    result = Outcome.ACTIVATED if op == BackendOp.ACTIVATE_UID else Outcome.REPLACED_AND_ACTIVE
+    result = Outcome.CHECKED_OUT if op == BackendOp.ACTIVATE_UID else Outcome.REPLACED_AND_ACTIVE
     state, ctx, effects = handle(state, ctx, BackendResult(1, op, result))
     assert state == KioskState.IDLE
     assert ctx.pending_op is ctx.outcome is None  # Never show the departed student's success.
@@ -336,8 +354,10 @@ def test_cancelled_activation_unregistered_reply_does_not_continue_registration(
     ("op", "outcome"),
     [
         (BackendOp.ACTIVATE_UID, Outcome.REGISTERED_AND_ACTIVE),
-        (BackendOp.REGISTER_AND_ACTIVATE, Outcome.ACTIVATED),
-        (BackendOp.REGISTER_AND_ACTIVATE, Outcome.ALREADY_ACTIVE),
+        # Check-out runs no eligibility check, so these can't be its answer.
+        (BackendOp.ACTIVATE_UID, Outcome.UNKNOWN_STUDENT),
+        (BackendOp.ACTIVATE_UID, Outcome.MISSING_INDUCTION),
+        (BackendOp.REGISTER_AND_ACTIVATE, Outcome.CHECKED_OUT),
         (BackendOp.REGISTER_AND_ACTIVATE, Outcome.UNREGISTERED),
         (BackendOp.ACTIVATE_UID, Outcome.READ_AGAIN),
     ],
@@ -370,7 +390,9 @@ def test_recovery_requires_both_health_flags_and_noise_cannot_bypass_offline(bac
 def test_reader_fault_during_write_survives_backend_resolution() -> None:
     state, ctx, _ = start()
     state, ctx, _ = handle(state, ctx, ReaderFault(1, "field command failed"))
-    state, ctx, _ = handle(state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED))
+    state, ctx, _ = handle(
+        state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)
+    )
     assert state == KioskState.READER_ERROR
     assert ctx.outcome is None
     assert handle(state, ctx, CardRead(2, UID, "000000001")) == (state, ctx, [])
@@ -380,7 +402,9 @@ def test_reader_fault_during_write_survives_backend_resolution() -> None:
 
 def test_result_screen_and_old_timer_cannot_restore_idle_after_backend_loss() -> None:
     state, ctx, _ = start()
-    state, ctx, _ = handle(state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED))
+    state, ctx, _ = handle(
+        state, ctx, BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)
+    )
     assert handle(state, ctx, Timeout(1, TimeoutName.SESSION)) == (state, ctx, [])
     state, ctx, _ = handle(state, ctx, BackendOffline())
     assert state == KioskState.OFFLINE

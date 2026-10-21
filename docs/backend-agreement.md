@@ -1,5 +1,7 @@
 # Student-card kiosk: ops backend agreement
 
+**Status, 2026-10-20:** tap-out and daily registration ([ADR-0006](adr/0006-tap-out-and-daily-registration.md)) supersede this document's "repeated taps never check out" and "registration stays" requirements. See [ops-api.md](ops-api.md).
+
 **Status, 2026-10-19:** Shane is taking over ops-backend. The current contract is [ops-api.md](ops-api.md). This document remains the background review of the ops checkout and its open risks.
 
 **Original status:** draft for discussion with the Backend VP; not an approved network contract.  

@@ -1,10 +1,12 @@
 # Student-card kiosk — Requirements and SDLC plan
 
+**Update, 2026-10-20:** tap-out and daily registration ([ADR-0006](adr/0006-tap-out-and-daily-registration.md)). R4, R5, R6, and R8 and their acceptance rows are rewritten. The kiosk code changes for this are **pending**: the section 7 transition table describes the target, and the current code still returns `ACTIVATED`/`ALREADY_ACTIVE`.
+
 Updated 2026-10-13 for reader fault handling, display readiness, and shared diagnostics. **Current phase: the controller collects both identifiers before simulated backend processing; real backend integration and broader reader validation remain open.** This replaces the card-lending implementation plan. The requirements below describe the intended student-only v1; core test coverage is not evidence that the integrated kiosk is delivered.
 
 ## 1. Purpose, scope, and current state
 
-Students register their existing student cards and activate daily access to participating makerspace tools. They do not borrow a second card. Registration associates a card UID with a student number; activation grants a temporary visit. These are separate concepts.
+Students tap their existing student cards to check in to and out of the makerspace, which grants access to participating tools while they are checked in. They do not borrow a second card. Check-in registers the card UID to a student number for that visit and activates the visit; check-out or midnight ends both.
 
 The project delivers the kiosk and agrees its interface with the backend team. The backend/tool team owns accounts, training, eligibility policy, persistent card associations, visit records, daily expiry, and tool access enforcement. The kiosk neither controls tool power nor unlocks entrance doors.
 
@@ -19,11 +21,11 @@ The events, pure state machine, and tests in `kiosk/` and `tests/` model the stu
 | R1 | Registration is fully self-service and uses one physical student-card presentation. The PN532 first reads the hexadecimal UID; its RF field is then disabled so the OMNIKEY can read the student number. Both identifiers refer to the student's existing card, not a separate loan card. |
 | R2 | Before registering a UID, the backend must confirm an existing account, completed general induction, and eligibility under its access policy. The backend owns additional restrictions and supplies the denial reason. |
 | R3 | Successful registration also activates the visit. The kiosk displays success only after backend confirmation of activation. |
-| R4 | Every kiosk presentation, including a returning visit, must supply both the UID and student number before backend processing starts. The backend resolves the registered card and checks current eligibility before activation. Tool readers are unchanged. |
-| R5 | An eligible student whose visit is already active receives an “already active” confirmation. Repeated taps do not end the visit or remove registration. |
-| R6 | A replacement student card is registered automatically after successful identification and eligibility checks. It replaces the previous UID association, invalidates the old card's access, and activates the replacement in the same interaction. |
+| R4 | Every kiosk presentation must supply both the UID and student number before backend processing starts. The backend first checks whether that UID has an active visit (R5); otherwise the presentation is a check-in, with registration and eligibility checks (R1–R3). Tool readers are unchanged. |
+| R5 | A tap with a card that has an active visit checks the student out: the backend ends the visit and its registration, and the kiosk confirms it. Check-out requires no eligibility check. A later tap checks in again. There is no double-tap guard; a held card toggles the visit (accepted, see ADR-0006). |
+| R6 | A replacement student card is registered automatically after successful identification and eligibility checks. It replaces the UID on the student's active visit and permanently revokes the old card. |
 | R7 | One activation is recognised across all participating tools without separate makerspace check-ins. Each tool still enforces its own training requirements. General induction does not grant permission to use every tool. |
-| R8 | The backend expires activations at 00:00 America/Toronto each day, following local daylight-saving changes. Registration persists. This is a daily reset, not an opening-hours restriction; eligible students may immediately reactivate. |
+| R8 | The backend expires visits and their registrations at 00:00 America/Toronto each day, following local daylight-saving changes. This is the daily UID wipe; it needs no job. Revoked cards stay revoked. This is a daily reset, not an opening-hours restriction; eligible students may check in again immediately. |
 | R9 | An unknown student number produces an account-signup QR. Save no association; the student signs up and presents their card again. |
 | R10 | Missing general induction produces a training-signup QR. Do not register or activate the card; the student returns after the backend records eligibility. |
 | R11 | If the backend is unavailable, refuse registration and activation and show an offline message. Never report success without confirmation. Recovery from an uncertain write outcome must be agreed with the backend team. |
@@ -39,14 +41,14 @@ These are acceptance scenarios for the integrated system. The revised core suite
 | Scenario | Required outcome | Requirements |
 |---|---|---|
 | Eligible first registration | One presentation yields both identifiers; confirmed registration and activation produce success. | R1–R3 |
-| Returning student | One presentation supplies both identifiers before eligibility/activation processing. Missing either identifier starts no backend operation. | R4 |
-| Already-active student / repeated taps | Confirm the eligible active visit without checkout, unlinking, or duplicate visit creation. | R5 |
+| Check-in | One presentation supplies both identifiers before any backend processing. Missing either identifier starts no backend operation. A card without an active visit is registered and activated after eligibility checks. | R4 |
+| Check-out | A tap with an active card ends the visit; tools then refuse the card. A suspended student or a dashboard outage does not block check-out. A following tap checks in again without a duplicate visit. | R5 |
 | No account | Show signup QR; create no association or activation; rescan after signup. | R9 |
 | Missing induction | Show training QR; create no association or activation. | R10 |
 | Other eligibility denial | Do not grant activation; display the backend decision using the agreed reason mapping. | R2, R4 |
-| Replacement card | Verify identity and eligibility; invalidate the old UID, register the new UID, and confirm activation. A denied attempt must not be presented as successful replacement. | R6 |
+| Replacement card | Verify identity and eligibility; revoke the old UID, move the active visit to the new UID, and confirm. The old card stays refused on later days. A denied attempt must not be presented as successful replacement. | R6 |
 | Multiple tools | One visit is recognised across participating tools; a tool denies a student lacking its specific training. Verify with the backend/tool team. | R7 |
-| Daily reset | At local midnight, activation expires but registration remains; a subsequent eligible tap reactivates. Include dates across daylight-saving changes. | R8 |
+| Daily reset | At local midnight, the visit and its registration expire with no job running; the next tap is a check-in that registers again. Revoked cards stay refused. Include dates across daylight-saving changes. | R8 |
 | Backend outage / lost response | No false success or offline activation. Verify recovery and uncertain outcomes against the agreed contract. | R11 |
 | Reader interruptions and ambiguity | Missing or delayed output, repeats, different arrival orders, and conflicting identifiers cannot create an incorrect association or replacement. | R13 |
 | Interrupted UID-first session | Remove card A after its UID is read, then present card B. Never register A's UID to B's student number. Discard expired/cancelled session data and reject stale reader or backend results. A timeout alone does not prove same-card identity. | R13 |
@@ -96,18 +98,18 @@ Shane explicitly delegated this migration. `kiosk/events.py`, `kiosk/machine.py`
 
 ### Internal transitions
 
-Collect-both routing attempts `ActivateUid` only after a complete `CardRead`. Its payload remains a UID; the ordering change does not establish a network schema. The backend must resolve the registered holder, check current eligibility, and activate or confirm an already-active visit. `UNREGISTERED` is a no-write routing result, distinct from `UNKNOWN_STUDENT`.
+Collect-both routing attempts `ActivateUid` only after a complete `CardRead`. Per [ops-api.md](ops-api.md) it carries the UID and the observed student number. The backend checks the student out if that UID has an active visit (`CHECKED_OUT`); otherwise it returns `UNREGISTERED` and the kiosk continues to registration, which is the everyday check-in. `UNREGISTERED` is a no-write routing result, distinct from `UNKNOWN_STUDENT`.
 
 | Current state | Fact received | Decision |
 |---|---|---|
 | `IDLE` | Complete valid `CardRead` while both systems are ready | `ACTIVATING`; retain the observed pair separately from verified identity, start the backend session deadline, and request `ActivateUid`. |
 | `IDLE` | Incomplete collection (`BadScan` with the current session ID) | `RESULT` with `READ_AGAIN`; no backend operation. |
 | `ACTIVATING` | Matching `IdentityConfirmed` arrives early | Hold its verified pair while waiting for the UID decision. |
-| `ACTIVATING` | `ACTIVATED` or `ALREADY_ACTIVE` | `RESULT`; confirm the backend outcome. Both reader values were collected before activation started. |
+| `ACTIVATING` | `CHECKED_OUT` | `RESULT`; confirm the check-out. Both reader values were collected before the request started. |
 | `ACTIVATING` | `UNREGISTERED` | `AWAITING_IDENTITY`, or immediately `REGISTERING` if the verified pair is already available. |
 | `AWAITING_IDENTITY` | Matching `IdentityConfirmed` | `REGISTERING`; request `RegisterAndActivate`. |
 | `REGISTERING` | `REGISTERED_AND_ACTIVE` or `REPLACED_AND_ACTIVE` | `RESULT`; success confirms the entire operation, including old-UID invalidation for replacement. |
-| Either backend wait | Account, induction, other policy denial, or UID conflict | `RESULT`; retain the outcome/reason code for display 1, clear identifiers, and issue no follow-up write. |
+| Either backend wait | Account, induction, other policy denial, or UID conflict | `RESULT`; retain the outcome/reason code for display 1, clear identifiers, and issue no follow-up write. `ActivateUid` accepts only `DENIED` and `UID_CONFLICT` here; account and induction denials come from registration. |
 | `AWAITING_IDENTITY` | Bad/conflicting data or session expiry | `RESULT` with `READ_AGAIN` or `SESSION_EXPIRED`; no registration request. Cancellation instead ends the interaction. |
 | Any active interaction | Backend outage or reader fault | Cancel acquisition and clear identifiers. Block on the unavailable system, or enter `OUTCOME_UNKNOWN` if a write could be outstanding. |
 | Backend wait | Lost response, cancellation, expiry, or contradictory capture | `OUTCOME_UNKNOWN`; retain the original operation reference without reporting success or retrying. |

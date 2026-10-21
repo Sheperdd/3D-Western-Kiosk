@@ -9,6 +9,7 @@ from kiosk.events import (
     BackendOnline,
     CardRead,
     Event,
+    IdentityConfirmed,
     KioskState,
     Outcome,
     ReaderReady,
@@ -46,14 +47,24 @@ async def main(device: str | None = None) -> None:
             queue.put_nowait(BackendOnline())
             queue.put_nowait(ReaderReady(0))
 
-            def demo_scan() -> None:
+            def demo_check_in() -> None:
                 queue.put_nowait(CardRead(1, "1234567890", "000123456"))
+                # Synthetic demo confirmation; hardware mode never does this.
+                queue.put_nowait(IdentityConfirmed(1, "1234567890", "000123456"))
 
-            scan_timer = asyncio.get_running_loop().call_later(10.0, demo_scan)
+            def demo_check_out() -> None:
+                queue.put_nowait(CardRead(2, "1234567890", "000123456"))
+
+            loop = asyncio.get_running_loop()
+            scan_timers = [
+                loop.call_later(10.0, demo_check_in),
+                loop.call_later(30.0, demo_check_out),
+            ]
             try:
                 await run(queue, on_state_change=update_display)
             finally:
-                scan_timer.cancel()
+                for timer in scan_timers:
+                    timer.cancel()
 
         else:
             from kiosk.readers import open_readers

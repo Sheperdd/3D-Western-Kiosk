@@ -1,5 +1,7 @@
 # Kiosk display content
 
+**Update, 2026-10-20:** tap-out ([ADR-0006](adr/0006-tap-out-and-daily-registration.md)). The tables below show the **target** copy: check in or out, a `CHECKED_OUT` result, `REGISTERED_AND_ACTIVE` as the everyday check-in, and no `ACTIVATED`/`ALREADY_ACTIVE`. `kiosk/web/app.js` has not been updated yet.
+
 **Implementation update, 2026-10-13:** Both dummy displays render state/outcome messages, public guidance, and connection failures. They show readiness only after reader cleanup and rearming. Success/assistance, QR, and retry result durations are 10, 30, and 6 seconds respectively, owned by the controller. The minimum-display-time proposal below is deferred: the prototype simulates a 2.5-second activation response and keeps registration fast. It publishes results immediately. Training/machine details remain unavailable and QR destinations remain non-scannable placeholders.
 
 The content proposal began on 2026-10-08. Production copy, training labels, URLs, help details, and non-success result durations still need final review. The training and machine-access sections below describe the intended backend-backed display; the current UI labels those details unavailable.
@@ -16,8 +18,8 @@ Neither display shows student identifiers: no name, student number (including ma
 | Situation / current state | Heading | Supporting text | When it ends |
 |---|---|---|---|
 | Starting up | Starting kiosk | Please wait while the kiosk gets ready. | Startup checks finish. This is a presentation distinction from a confirmed outage. |
-| Ready / collecting identifiers (`IDLE`, acquisition available or in progress) | Activate your makerspace visit | Hold your student card over the readers until this screen says you can remove it. | Both identifiers arrive, collection expires, or a reader fault occurs. No separate reading-card screen. |
-| `ACTIVATING` | Checking your access | Card read. You can remove your card now. | Backend response, error, or timeout. |
+| Ready / collecting identifiers (`IDLE`, acquisition available or in progress) | Tap your card to check in or out | Hold your student card over the readers until this screen says you can remove it. | Both identifiers arrive, collection expires, or a reader fault occurs. No separate reading-card screen. |
+| `ACTIVATING` | Checking your card | Card read. You can remove your card now. | Backend response, error, or timeout. Whether this is a check-in or check-out is not yet known. |
 | `AWAITING_IDENTITY` | Checking your card details | You can remove your card. Please wait. | Verified identity, timeout, cancellation, or error. Both raw values have already been collected; this is not a request for another tap. |
 | `REGISTERING` | Setting up your card | You can remove your card. Please wait. | Backend result, error, or session timeout. Registration versus replacement is not yet known. |
 | `REARMING` (display only) / reader cleanup | Getting ready for the next card | Please wait before presenting another card. | Cleanup is complete, both systems are ready, and no backend outcome is unresolved. |
@@ -40,10 +42,9 @@ The current hardware path never emits `IdentityConfirmed`; therefore the eventua
 
 | Outcome | Heading | Supporting text / action | Duration |
 |---|---|---|---|
-| `ACTIVATED` | Your visit is active | Remove your card. Your training and machine access are shown below. | 10 seconds; confirmed |
-| `ALREADY_ACTIVE` | Your visit is already active | Remove your card. No further check-in is needed. Your training and machine access are shown below. | 10 seconds; confirmed |
-| `REGISTERED_AND_ACTIVE` | Card registered. Visit active. | Remove your card. Your training and machine access are shown below. | 10 seconds; confirmed |
+| `REGISTERED_AND_ACTIVE` | You're checked in | Remove your card. Your training and machine access are shown below. Tap again when you leave. | 10 seconds; confirmed |
 | `REPLACED_AND_ACTIVE` | Replacement card activated | Remove your card. Your previous card no longer works for makerspace access. Your training and machine access are shown below. | 10 seconds; confirmed |
+| `CHECKED_OUT` | You're checked out | Remove your card. Tap again to check back in. No training or machine details. | 6 seconds; proposed, tune on the monitor |
 | `UNKNOWN_STUDENT` | Create your makerspace account | Remove your card. Scan the QR code with your phone to sign up, then return and present your card again. | 30 seconds; confirmed |
 | `MISSING_INDUCTION` | General induction required | Remove your card. Scan the QR code for training instructions. Return after your training has been recorded. | 30 seconds; confirmed |
 | `DENIED` | Unable to activate your visit | Remove your card. Contact the makerspace team for help. An approved reason may replace this generic explanation. | 10 seconds |
@@ -65,7 +66,7 @@ Below the result heading and remove-card instruction, show:
 - **Machines you can access:** a readable list of machine names the backend confirms this student may currently access.
 - **Reminder:** Follow each machine's operating instructions. Access is checked again at the machine.
 
-Use this summary for `ACTIVATED`, `ALREADY_ACTIVE`, `REGISTERED_AND_ACTIVE`, and `REPLACED_AND_ACTIVE`. General induction and tool training remain distinct: the kiosk must not infer a machine list from a numeric level or assume that induction permits every machine. The backend owns that decision, including equipment availability. Exact level names and the response fields still need agreement with the backend team.
+Use this summary for `REGISTERED_AND_ACTIVE` and `REPLACED_AND_ACTIVE`. Never show it for `CHECKED_OUT`; the student no longer has access. General induction and tool training remain distinct: the kiosk must not infer a machine list from a numeric level or assume that induction permits every machine. The backend owns that decision, including equipment availability. Exact level names and the response fields still need agreement with the backend team.
 
 Missing information is not an empty permission list. If the level or machine list is unavailable, show “Training level unavailable” or “Machine access details unavailable” for that field; do not guess or reuse the previous student's data. A confirmed empty list shows “No machines currently available to you. Contact the makerspace team for guidance.” A successful visit can still be shown when these optional details are unavailable.
 
@@ -77,7 +78,7 @@ Keep the list readable without touch input. Confirm the machine inventory and sc
 |---|---|---|---|
 | `OFFLINE` after startup | Kiosk temporarily unavailable | We can't connect to the access service. Please try later or contact the makerspace team. | Verified backend and reader readiness. |
 | `READER_ERROR` | Card reader unavailable | We can't read cards right now. Please contact the makerspace team. | Verified reader recovery and backend readiness. |
-| `OUTCOME_UNKNOWN` | Result not confirmed | Remove your card. We couldn't confirm whether your visit was activated. Please contact the makerspace team; don't scan again yet. | An authoritative response resolves the outstanding operation. |
+| `OUTCOME_UNKNOWN` | Result not confirmed | Remove your card. We couldn't confirm your check-in or check-out. Please contact the makerspace team; don't scan again yet. | An authoritative response resolves the outstanding operation. |
 
 These screens do not auto-clear on a display timer. Do not turn an unknown outcome into “failed,” “success,” or “try again”: a backend write may have completed. If a late response resolves an abandoned interaction, follow the existing core behavior and return to availability without showing that student's old success result.
 
@@ -87,11 +88,12 @@ Support instructions need an agreed contact or route. “Contact the makerspace 
 
 Use a persistent heading, **Using the makerspace**, with short sections that remain visible independently of the current student's result. Start with a static layout; there is no need for a rotating slideshow unless the agreed content cannot fit legibly.
 
-**Check in**
+**Check in and out**
 
-1. Present your student card to activate your visit.
+1. Present your student card to check in.
 2. Hold it in place until the other screen says to remove it.
 3. Use your card at tools you are trained to use.
+4. Tap your card again when you leave to check out.
 
 **Work responsibly**
 
@@ -119,7 +121,9 @@ A small, persistent availability area changes with the interaction while the gen
 | Offline or reader fault | Kiosk temporarily unavailable |
 | Outcome unknown | Kiosk temporarily unavailable |
 
-Display 2 never announces the current student's training level or machine access, or that they lack an account, lack training, have been denied, or have replaced a card. Do not mirror display 1's result text onto it.
+The "In use" message reads "Give the person checking in or out space. Wait for the ready message."
+
+Display 2 never announces the current student's training level or machine access, whether they checked in or out, or that they lack an account, lack training, have been denied, or have replaced a card. Do not mirror display 1's result text onto it.
 
 ## Presentation rules
 

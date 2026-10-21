@@ -37,9 +37,9 @@ function display(number = "1") {
 
 const stateHeadings = {
   STARTING: "Starting kiosk",
-  IDLE: "Activate your makerspace visit",
+  IDLE: "Tap your card to check in or out",
   REARMING: "Getting ready for the next card",
-  ACTIVATING: "Checking your access",
+  ACTIVATING: "Checking your card",
   AWAITING_IDENTITY: "Checking your card details",
   REGISTERING: "Setting up your card",
   OFFLINE: "Kiosk temporarily unavailable",
@@ -50,7 +50,7 @@ const stateHeadings = {
 test("every controller state has student instructions and clears result details", () => {
   const { context, nodes } = display();
   for (const [state, heading] of Object.entries(stateHeadings)) {
-    context.renderPayload({ state: "RESULT", outcome: "ACTIVATED" });
+    context.renderPayload({ state: "RESULT", outcome: "REGISTERED_AND_ACTIVE" });
     context.renderPayload({ state, outcome: null });
     assert.equal(nodes.screen.textContent, heading);
     assert.equal(nodes["access-details"].hidden, true);
@@ -60,9 +60,8 @@ test("every controller state has student instructions and clears result details"
 });
 
 const results = [
-  ["ACTIVATED", "Your visit is active", true, ""],
-  ["ALREADY_ACTIVE", "Your visit is already active", true, ""],
-  ["REGISTERED_AND_ACTIVE", "Card registered. Visit active.", true, ""],
+  ["REGISTERED_AND_ACTIVE", "You're checked in", true, ""],
+  ["CHECKED_OUT", "You're checked out", false, ""],
   ["REPLACED_AND_ACTIVE", "Replacement card activated", true, ""],
   ["UNKNOWN_STUDENT", "Create your makerspace account", false, "Create an account"],
   ["MISSING_INDUCTION", "General induction required", false, "General induction"],
@@ -82,6 +81,9 @@ test("all final outcomes render, with training only on success and honest QR pla
     assert.equal(nodes["qr-title"].textContent, qr);
     assert.match(nodes.message.textContent, /[Rr]emove/);
   }
+  context.renderPayload({ state: "RESULT", outcome: "CHECKED_OUT" });
+  assert.equal(nodes.eyebrow.textContent, "Checked out");
+  assert.equal(context.document.body.dataset.tone, "success");
   assert.match(html, /Training level unavailable/);
   assert.match(html, /Machine access details unavailable/);
   assert.match(html, /Signup link not available in this demo/);
@@ -90,10 +92,10 @@ test("all final outcomes render, with training only on success and honest QR pla
 test("unknown or malformed payloads clear success without showing raw data", () => {
   const { context, nodes } = display();
   for (const data of [null, {}, [], "IDLE", { state: "IDLE" },
-    { state: "RESULT", outcome: null }, { state: "RESULT", outcome: ["ACTIVATED"] },
+    { state: "RESULT", outcome: null }, { state: "RESULT", outcome: ["REGISTERED_AND_ACTIVE"] },
     { state: "RESULT", outcome: "UNREGISTERED" }, { state: "RESULT", outcome: "constructor" },
     { state: "<script>secret</script>", outcome: null }, { state: ["IDLE"], outcome: null }]) {
-    context.renderPayload({ state: "RESULT", outcome: "ACTIVATED" });
+    context.renderPayload({ state: "RESULT", outcome: "REGISTERED_AND_ACTIVE" });
     context.renderPayload(data);
     assert.equal(nodes.screen.textContent, "Display information unavailable");
     assert.equal(nodes["access-details"].hidden, true);
@@ -115,7 +117,7 @@ test("public display only renders availability, ignoring private fields", () => 
     assert.ok(!Object.values(nodes).some((node) => node.textContent.includes("secret")));
   }
   for (const data of [null, {}, { status: ["WAITING"] }, { status: "constructor" },
-    { status: "secret student data" }, { state: "RESULT", outcome: "ACTIVATED" }]) {
+    { status: "secret student data" }, { state: "RESULT", outcome: "REGISTERED_AND_ACTIVE" }]) {
     context.renderPayload(data);
     assert.equal(nodes["public-status"].textContent, "Display information unavailable");
   }
@@ -123,13 +125,13 @@ test("public display only renders availability, ignoring private fields", () => 
 
 test("unchanged polling does not rewrite live regions or schedule result transitions", () => {
   const ui = display();
-  const payload = { state: "RESULT", outcome: "ACTIVATED" };
+  const payload = { state: "RESULT", outcome: "REGISTERED_AND_ACTIVE" };
   ui.context.renderPayload(payload);
   const writes = ui.writes();
   ui.context.renderPayload(payload);
   assert.equal(ui.writes(), writes);
   assert.equal(ui.timers.length, 0);
-  assert.equal(ui.nodes.screen.textContent, "Your visit is active");
+  assert.equal(ui.nodes.screen.textContent, "You're checked in");
 });
 
 test("network, HTTP and JSON errors clear old results; polling recovers on both displays", async () => {
@@ -140,7 +142,7 @@ test("network, HTTP and JSON errors clear old results; polling recovers on both 
     assert.equal(requests[0].options.cache, "no-store");
     assert.ok(requests[0].options.signal instanceof AbortSignal);
     const good = number === "1"
-      ? { state: "RESULT", outcome: "ACTIVATED" }
+      ? { state: "RESULT", outcome: "REGISTERED_AND_ACTIVE" }
       : { status: "WAITING" };
     for (const fail of [
       async () => { throw new Error("network down"); },
@@ -156,7 +158,7 @@ test("network, HTTP and JSON errors clear old results; polling recovers on both 
       assert.equal(retry.delay, 250);
       context.fetch = async () => ({ ok: true, json: async () => good });
       await retry.callback();
-      assert.equal(heading.textContent, number === "1" ? "Your visit is active" : "Ready for the next student");
+      assert.equal(heading.textContent, number === "1" ? "You're checked in" : "Ready for the next student");
       assert.equal(timers.pop().delay, 250);
     }
   }

@@ -51,8 +51,13 @@ _DENIALS = {
     Outcome.UID_CONFLICT,
 }
 _BACKEND_OUTCOMES = {
-    BackendOp.ACTIVATE_UID: _DENIALS
-    | {Outcome.ACTIVATED, Outcome.ALREADY_ACTIVE, Outcome.UNREGISTERED},
+    # Check-out needs no eligibility check, so account/induction denials are invalid here.
+    BackendOp.ACTIVATE_UID: {
+        Outcome.CHECKED_OUT,
+        Outcome.UNREGISTERED,
+        Outcome.DENIED,
+        Outcome.UID_CONFLICT,
+    },
     BackendOp.REGISTER_AND_ACTIVATE: _DENIALS
     | {Outcome.REGISTERED_AND_ACTIVE, Outcome.REPLACED_AND_ACTIVE},
 }
@@ -167,7 +172,7 @@ def handle(
             replace(ctx, pending_op=BackendOp.ACTIVATE_UID),
             [
                 StartTimeout(ctx.session_id, TimeoutName.SESSION),
-                ActivateUid(ctx.session_id, uid),
+                ActivateUid(ctx.session_id, uid, event.student_number),
             ],
         )
 

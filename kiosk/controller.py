@@ -32,13 +32,24 @@ async def fire_timeout(queue: asyncio.Queue[Event], effect: StartTimeout, second
     await queue.put(timeout_event)
 
 
+# ponytail: in-memory demo visits; lost on restart, which the real ops backend replaces.
+DEMO_CHECKED_IN: set[str] = set()
+
+
 async def fake_activate_uid(
     queue: asyncio.Queue[Event],
     effect: ActivateUid,
     seconds: float,
-    desired_outcome: Outcome = Outcome.DENIED,
+    desired_outcome: Outcome | None = None,
 ) -> None:
+    """Without desired_outcome, toggle like ops: check out a checked-in UID, else UNREGISTERED."""
     try:
+        if desired_outcome is None:
+            if effect.uid in DEMO_CHECKED_IN:
+                DEMO_CHECKED_IN.discard(effect.uid)
+                desired_outcome = Outcome.CHECKED_OUT
+            else:
+                desired_outcome = Outcome.UNREGISTERED
         await asyncio.sleep(seconds)
         await queue.put(BackendResult(effect.session_id, BackendOp.ACTIVATE_UID, desired_outcome))
     except Exception as e:
@@ -62,6 +73,7 @@ async def fake_register_and_activate(
                 BackendError(effect.session_id, BackendOp.REGISTER_AND_ACTIVATE, failure)
             )
         else:
+            DEMO_CHECKED_IN.add(effect.uid)
             await queue.put(
                 BackendResult(
                     effect.session_id,
@@ -86,8 +98,7 @@ STUDENT_NUMBER_TIMEOUT = 10.0  # After UID/RF handover; waiting for a card has n
 
 # Timers for the displays
 RESULT_DURATION_SECONDS: dict[Outcome, float] = {
-    Outcome.ACTIVATED: 10.0,
-    Outcome.ALREADY_ACTIVE: 10.0,
+    Outcome.CHECKED_OUT: 6.0,  # Proposed; tune on the real monitor.
     Outcome.REGISTERED_AND_ACTIVE: 10.0,
     Outcome.REPLACED_AND_ACTIVE: 10.0,
     Outcome.UNKNOWN_STUDENT: 30.0,
@@ -127,9 +138,7 @@ def dispatch(
             del timers[(effect.session_id, effect.name)]
 
     elif isinstance(effect, ActivateUid):
-        backend_task = asyncio.create_task(
-            fake_activate_uid(queue, effect, DEMO_ACTIVATION_DELAY, Outcome.ACTIVATED)
-        )
+        backend_task = asyncio.create_task(fake_activate_uid(queue, effect, DEMO_ACTIVATION_DELAY))
         background_tasks.add(backend_task)
         backend_task.add_done_callback(background_tasks.discard)
 

@@ -5,6 +5,8 @@ date: 2026-09-16
 
 # Persistent student-card registration with separate daily activation
 
+> **Partly superseded, 2026-10-20:** [ADR-0006](0006-tap-out-and-daily-registration.md) makes a repeat tap check the student out, and registrations now last one visit (wiped at check-out or midnight). Backend authority, verified replacement, and the collect-both rule below still apply.
+
 The adjacent-reader arrangement produced a student number and a stable hexadecimal card UID from one student card. Student v1 will therefore register existing student cards instead of lending separate RFID cards, with broader card compatibility and reliable pairing still to be validated. Registration persists, while a separate backend-confirmed activation grants a visit after current account, general-induction, and eligibility checks.
 
 One presentation registers and activates an eligible student; later visits require only a UID tap. Automatic verified replacement invalidates the old UID and activates the new card. Repeat taps confirm an active visit rather than unlinking or checking out. The backend expires activations at midnight America/Toronto without deleting registrations or prohibiting immediate reactivation; individual tools still enforce their own training requirements.

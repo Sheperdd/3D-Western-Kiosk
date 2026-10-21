@@ -7,10 +7,10 @@ A student-card registration and daily tool-access kiosk for 3D-Western. Students
 
 ## Intended student flow
 
-1. **First registration:** present one student card to two adjacent readers. The PN532 reads the hexadecimal UID and disables its RF field; the OMNIKEY then reads the student number. The backend verifies the account, general induction, and eligibility before registering the association and activating the visit. Reliable same-card assurance remains to be established before production registration.
-2. **Repeat visits:** keep the card presented until both the UID and student number are collected, then begin backend processing. The backend checks current eligibility and activates access. If already active, the kiosk confirms that status; it does not check the student out.
-3. **Replacement card:** registration replaces the old UID association after verification, invalidates the old card's access, and activates the replacement.
-4. **Daily reset:** activation expires at midnight in America/Toronto. Registration remains, and an eligible student may immediately reactivate. One activation covers all participating tools; each tool still checks its own training requirements.
+1. **Check in:** present one student card to two adjacent readers. The PN532 reads the hexadecimal UID and disables its RF field; the OMNIKEY then reads the student number. If the card has no active visit, the backend verifies the account, general induction, and eligibility, then registers the card for this visit and activates it. Reliable same-card assurance remains to be established before production registration.
+2. **Check out:** tap the same card again. If it has an active visit, the backend ends the visit and its registration. No eligibility check is needed to leave. See [ADR-0006](docs/adr/0006-tap-out-and-daily-registration.md).
+3. **Replacement card:** registration moves the active visit to the new UID after verification and permanently revokes the old card.
+4. **Daily reset:** visits and their registrations expire at midnight in America/Toronto, so every day starts with a fresh check-in. Revoked cards stay revoked. One visit covers all participating tools; each tool still checks its own training requirements.
 
 No account means an account-signup QR and a rescan after signup. Missing induction means a training-signup QR, with no registration or activation. Backend unavailability prevents registration and activation; success requires backend confirmation.
 

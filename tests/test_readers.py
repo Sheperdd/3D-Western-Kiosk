@@ -106,6 +106,8 @@ def test_controller_first_scan_runs_real_threaded_reader_pipeline(
         monkeypatch.setattr(controller, "handle", observe)
         monkeypatch.setattr(controller, "fire_timeout", timer)
         monkeypatch.setattr(controller, "DEMO_ACTIVATION_DELAY", 0)
+        # Checked in already, so the tap reaches a result (check-out) without registration.
+        monkeypatch.setattr(controller, "DEMO_CHECKED_IN", {"0001ABCD"})
         queue.put_nowait(BackendOnline())
         queue.put_nowait(ReaderReady(0))
         runner = asyncio.create_task(

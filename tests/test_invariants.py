@@ -34,9 +34,8 @@ from kiosk.machine import Context, handle
 
 UID = "0001ABCD"
 IDENTITY = IdentityConfirmed(1, UID, "000000001")
-SUCCESS = {
-    Outcome.ACTIVATED,
-    Outcome.ALREADY_ACTIVE,
+CONFIRMED = {
+    Outcome.CHECKED_OUT,
     Outcome.REGISTERED_AND_ACTIVE,
     Outcome.REPLACED_AND_ACTIVE,
 }
@@ -74,10 +73,12 @@ for trace in (
         IDENTITY,
         BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED),
     ],
-    [CardRead(1, UID, "000000001"), BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.ACTIVATED)],
+    [CardRead(1, UID, "000000001"), BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.CHECKED_OUT)],
     [
         CardRead(1, UID, "000000001"),
-        BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.MISSING_INDUCTION),
+        IDENTITY,
+        BackendResult(1, BackendOp.ACTIVATE_UID, Outcome.UNREGISTERED),
+        BackendResult(1, BackendOp.REGISTER_AND_ACTIVATE, Outcome.MISSING_INDUCTION),
     ],
     [BackendOffline()],
     [ReaderFault(0, "unavailable")],
@@ -136,7 +137,11 @@ def test_transition_invariants(state: KioskState, ctx: Context, event: Event) ->
         assert new_ctx.pending_op is not None
         assert new_ctx.outcome is None
 
-    if state != KioskState.RESULT and new_state == KioskState.RESULT and new_ctx.outcome in SUCCESS:
+    if (
+        state != KioskState.RESULT
+        and new_state == KioskState.RESULT
+        and new_ctx.outcome in CONFIRMED
+    ):
         assert isinstance(event, BackendResult)
         assert event.session_id == ctx.session_id
         assert event.op == ctx.pending_op

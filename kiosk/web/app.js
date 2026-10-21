@@ -8,7 +8,7 @@ const states = {
   },
   IDLE: {
     tone: "ready", icon: "card", label: "Ready when you are",
-    title: "Activate your makerspace visit",
+    title: "Tap your card to check in or out",
     message: "Hold your student card over the readers until this screen says you can remove it.",
     next: "One card at a time. Use your own student card.",
   },
@@ -17,8 +17,8 @@ const states = {
     message: "Please wait before presenting another card.",
   },
   ACTIVATING: {
-    tone: "busy", icon: "wait", label: "Card read", title: "Checking your access",
-    message: "You can remove your card now. Please wait while we check your visit.",
+    tone: "busy", icon: "wait", label: "Card read", title: "Checking your card",
+    message: "You can remove your card now. Please wait.",
   },
   AWAITING_IDENTITY: {
     tone: "busy", icon: "wait", label: "Card read", title: "Checking your card details",
@@ -43,23 +43,22 @@ const states = {
   },
   OUTCOME_UNKNOWN: {
     tone: "unavailable", icon: "help", label: "Please ask for help", title: "Result not confirmed",
-    message: "Remove your card. We couldn't confirm whether your visit was activated.",
+    message: "Remove your card. We couldn't confirm your check-in or check-out.",
     next: "Contact the makerspace team. Don't scan again yet.",
   },
 };
 
 const outcomes = {
-  ACTIVATED: {
-    title: "Your visit is active",
-    message: "Remove your card. You're checked in for your makerspace visit.", success: true,
-  },
-  ALREADY_ACTIVE: {
-    title: "Your visit is already active",
-    message: "Remove your card. No further check-in is needed.", success: true,
-  },
   REGISTERED_AND_ACTIVE: {
-    title: "Card registered. Visit active.",
-    message: "Remove your card. Your student card is ready for future check-ins.", success: true,
+    title: "You're checked in",
+    message: "Remove your card. Tap again when you leave.", success: true,
+  },
+  // Not `success`: that flag means "show access details". The spread in renderPayload
+  // lets these fields override the attention defaults.
+  CHECKED_OUT: {
+    title: "You're checked out",
+    message: "Remove your card. Thanks for visiting the makerspace.",
+    tone: "success", icon: "check", label: "Checked out", next: "Tap again to check back in.",
   },
   REPLACED_AND_ACTIVE: {
     title: "Replacement card activated",
@@ -106,7 +105,7 @@ const publicStatuses = {
   },
   "IN USE": {
     tone: "busy", icon: "wait", title: "In use — please wait",
-    message: "Give the person checking in space. Wait for the ready message.",
+    message: "Give the person checking in or out space. Wait for the ready message.",
   },
   UNAVAILABLE: {
     tone: "unavailable", icon: "alert", title: "Kiosk temporarily unavailable",
